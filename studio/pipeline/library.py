@@ -1,0 +1,96 @@
+import hashlib
+import json
+import re
+import shutil
+from pathlib import Path
+from .storage import safe_extract
+
+class Library:
+    def __init__(self,store,manifest_id,cache):
+        self.store=store;self.cache=Path(cache);self.cache.mkdir(parents=True,exist_ok=True)
+        store.download(manifest_id,self.cache/'library.json')
+        self.manifest=json.loads((self.cache/'library.json').read_text())
+        self.videos={str(v['video_id']):v for v in self.manifest['videos']}
+        if len(self.videos)!=len(self.manifest['videos']):raise ValueError('Duplicate video IDs in library manifest')
+
+    @classmethod
+    def from_folder(cls,store,folder_id,cache):
+        obj=object.__new__(cls);obj.store=store;obj.cache=Path(cache);obj.cache.mkdir(parents=True,exist_ok=True)
+        items=store.children(folder_id)
+        byname={x['name']:x for x in items}
+        if ('index.zip' not in byname and 'asset-parts.json' not in byname) or 'sha256sums.json' not in byname:
+            raise ValueError('Library needs index.zip and sha256sums.json, produced by prepare_library.py.')
+        store.download(byname['sha256sums.json']['id'],obj.cache/'sha256sums.json')
+        checks=json.loads((obj.cache/'sha256sums.json').read_text())
+        media=list(items)
+        for item in items:
+            if item['mimeType']=='application/vnd.google-apps.folder' and item['name'].lower() in {'video','videos'}:
+                media.extend(store.children(item['id']))
+        allbyname={x['name']:x for x in media}
+        parts={}
+        if 'asset-parts.json' in byname:
+            store.download(byname['asset-parts.json']['id'],obj.cache/'asset-parts.json')
+            rawparts=json.loads((obj.cache/'asset-parts.json').read_text())
+            for name,asset in rawparts.items():
+                if not 1<=len(asset.get('parts',[]))<=32:raise ValueError('Invalid number of asset parts')
+                if name not in checks or asset['sha256']!=checks[name]:raise ValueError('Asset checksum does not match library checksums')
+                resolved=[]
+                for part in asset['parts']:
+                    if part['name'] not in allbyname:raise ValueError(f'Library upload is incomplete: {name}')
+                    if not re.fullmatch('[a-f0-9]{64}',part['sha256']):raise ValueError('Invalid part checksum')
+                    resolved.append({'file_id':allbyname[part['name']]['id'],'sha256':part['sha256']})
+                parts[name]={'parts':resolved,'sha256':asset['sha256']}
+        videos=[]
+        for item in media:
+            match=re.match(r'^(\d+)(?:_|\.)',item['name'])
+            if match and Path(item['name']).suffix.lower() in {'.mp4','.mov','.mkv','.webm','.avi','.m4v'}:
+                if item['name'] not in checks:raise ValueError('Source video has no administrator-provided checksum')
+                videos.append({'video_id':match.group(1),'filename':item['name'],'file_id':item['id'],'sha256':checks[item['name']]})
+        for name,asset in parts.items():
+            match=re.match(r'^(\d+)(?:_|\.)',name)
+            if match and Path(name).suffix.lower() in {'.mp4','.mov','.mkv','.webm','.avi','.m4v'}:
+                videos.append({'video_id':match.group(1),'filename':name,**asset})
+        index=parts.get('index.zip') or {'file_id':byname['index.zip']['id'],'sha256':checks['index.zip']}
+        obj.manifest={'index':index,'videos':videos}
+        obj.videos={v['video_id']:v for v in videos}
+        if len(obj.videos)!=len(videos):raise ValueError('More than one source file uses the same video ID')
+        return obj
+
+    def download_asset(self,item,dest):
+        dest=Path(dest);dest.parent.mkdir(parents=True,exist_ok=True)
+        if 'parts' not in item:return self.store.download(item['file_id'],dest)
+        with dest.open('wb') as output:
+            for part in item['parts']:
+                temp=self.cache/'parts'/part['sha256']
+                if not temp.exists():self.store.download(part['file_id'],temp)
+                with temp.open('rb') as inp:
+                    if hashlib.file_digest(inp,'sha256').hexdigest()!=part['sha256']:raise ValueError('Asset-part checksum mismatch')
+                    inp.seek(0);shutil.copyfileobj(inp,output,1024*1024)
+
+    def index(self):
+        item=self.manifest['index']
+        expected=item['sha256']
+        if not re.fullmatch('[a-fA-F0-9]{64}',expected):raise ValueError('Invalid index checksum')
+        folder=self.cache/expected
+        if not (folder/'manifest.json').exists():
+            archive=self.cache/'index.zip';self.download_asset(item,archive)
+            with archive.open('rb') as handle:actual=hashlib.file_digest(handle,'sha256').hexdigest()
+            if actual!=expected:raise ValueError('Index checksum mismatch')
+            safe_extract(archive,folder)
+        return folder
+
+    def video(self,video_id):
+        item=self.videos[str(video_id)]
+        expected=item.get('sha256')
+        if not expected:raise ValueError('Source video must have a recorded checksum')
+        safe_id=hashlib.sha256(f'{video_id}:{expected}'.encode()).hexdigest()[:20]
+        suffix=Path(item['filename']).suffix.lower()
+        if suffix not in {'.mp4','.mov','.mkv','.m4v','.avi','.webm'}:raise ValueError('Unsupported source video')
+        path=self.cache/'videos'/(safe_id+suffix)
+        if not path.exists():
+            temp=path.with_suffix('.download');self.download_asset(item,temp)
+            with temp.open('rb') as handle:actual=hashlib.file_digest(handle,'sha256').hexdigest()
+            if actual!=expected:raise ValueError('Video checksum mismatch')
+            temp.replace(path)
+        return path
+

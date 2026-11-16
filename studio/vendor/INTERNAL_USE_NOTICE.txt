@@ -1,0 +1,2 @@
+Internal JoVE development package. Do not publish the corpus, metadata, API keys, indexes, scripts, or generated reports outside approved company channels.
+

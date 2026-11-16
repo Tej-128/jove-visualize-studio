@@ -1,0 +1,16 @@
+.env
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+runtime/
+*.mp4
+*.wav
+*.sqlite*
+*.npy
+*.zip
+secrets*.json
+service-account*.json
+dev-dependencies/
+
