@@ -13,4 +13,16 @@ runtime/
 secrets*.json
 service-account*.json
 dev-dependencies/
+*.docx
+*.xlsx
+*.rar
+*.vtt
+*.srt
+*.mp3
+*.flac
+*.m4a
+*.mlt
+*.csv
+*.pem
+*.key
 
