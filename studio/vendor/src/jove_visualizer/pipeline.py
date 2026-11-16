@@ -123,6 +123,8 @@ def match_steps(
     started: dict[int, float] = {}
     for position, step in enumerate(steps, start=1):
         started[step.number] = time.perf_counter()
+        if progress:
+            progress(position - 1, len(steps), f"Retrieving caption candidates for step {step.number}")
         retrieved[step.number] = index.retrieve(step)
         if progress:
             progress(position, len(steps), f"Retrieved VTT candidates with protocol context for step {step.number}")
@@ -141,6 +143,8 @@ def match_steps(
         return step.number, reranker.rerank(step, candidates)
 
     max_workers = min(settings.openai_max_concurrency, len(steps)) if api_key and settings.openai_enabled else 1
+    if progress:
+        progress(0, len(steps), "Reviewing scientific caption matches")
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(rerank_one, step): step for step in steps}
         completed = 0

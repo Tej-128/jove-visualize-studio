@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import shutil
+import zipfile
 from pathlib import Path
 from .storage import safe_extract
 
@@ -52,6 +53,12 @@ class Library:
                 videos.append({'video_id':match.group(1),'filename':name,**asset})
         index=parts.get('index.zip') or {'file_id':byname['index.zip']['id'],'sha256':checks['index.zip']}
         obj.manifest={'index':index,'videos':videos}
+        if 'article-title-cache.json' in byname:
+            if 'article-title-cache.zip' not in byname:raise ValueError('Article title cache upload is incomplete')
+            descriptor=obj.cache/'article-title-cache.json'
+            store.download(byname['article-title-cache.json']['id'],descriptor)
+            info=json.loads(descriptor.read_text())
+            obj.manifest['title_cache']={**info,'file_id':byname['article-title-cache.zip']['id']}
         obj.videos={v['video_id']:v for v in videos}
         if len(obj.videos)!=len(videos):raise ValueError('More than one source file uses the same video ID')
         return obj
@@ -77,7 +84,28 @@ class Library:
             with archive.open('rb') as handle:actual=hashlib.file_digest(handle,'sha256').hexdigest()
             if actual!=expected:raise ValueError('Index checksum mismatch')
             safe_extract(archive,folder)
+        self.restore_title_cache(folder,expected)
         return folder
+
+    def restore_title_cache(self,folder,index_hash):
+        item=self.manifest.get('title_cache')
+        if not item:return
+        expected=item.get('sha256','')
+        if not re.fullmatch('[a-f0-9]{64}',expected) or item.get('index_sha256')!=index_hash:
+            raise ValueError('Article title cache does not match this caption index')
+        marker=folder/'title-cache.sha256'
+        if marker.exists() and marker.read_text()==expected:return
+        archive=self.cache/('article-titles-'+expected+'.zip')
+        if not archive.exists():self.download_asset(item,archive)
+        with archive.open('rb') as handle:
+            if hashlib.file_digest(handle,'sha256').hexdigest()!=expected:raise ValueError('Article title cache checksum mismatch')
+        allowed={'v2_cache/'+name for name in ['article_cache_meta.json','article_ids.json','article_title_embeddings.npy','article_titles.json']}
+        with zipfile.ZipFile(archive) as z:
+            names=z.namelist()
+            if len(names)!=4 or set(names)!=allowed or sum(x.file_size for x in z.infolist())>64*1024**2:
+                raise ValueError('Unexpected article title cache contents')
+        safe_extract(archive,folder)
+        marker.write_text(expected)
 
     def video(self,video_id):
         item=self.videos[str(video_id)]

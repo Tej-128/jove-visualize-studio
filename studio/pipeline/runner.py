@@ -63,6 +63,7 @@ def run(folder,owner,text,config):
     state=json.loads((folder/'state.json').read_text());store=None;remote=None;index=None
     def checkpoint(stage,status='running',**details):
         state.update(stage=stage,status=status,updated=time.time(),**details);write_json(folder/'state.json',state)
+        print(f"[job {state['id'][:8]}] {stage}: {details.get('detail',status)}",flush=True)
         if store and remote:store.upload(folder/'state.json',remote)
     try:
         store=DriveStore(config['google_service_account'])
@@ -74,7 +75,10 @@ def run(folder,owner,text,config):
         settings.openai_model=config.get('TEXT_MODEL','gpt-5-mini')
         # The pilot never deserializes a remotely supplied trained Python object.
         settings.learned_ranker_enabled=False;settings.reviewer_feedback_enabled=False
-        settings.openai_max_concurrency=1
+        settings.openai_max_concurrency=2
+        settings.openai_timeout_seconds=60
+        settings.openai_max_retries=2
+        checkpoint('model_setup',detail='Loading the caption model and prepared title cache')
         index=CorpusIndex(library.index(),settings)
         steps=parse_steps_from_text(text)
         if not steps:raise ValueError('No numbered script steps found')
@@ -88,7 +92,9 @@ def run(folder,owner,text,config):
             if any(c['step'] not in stepmap or normalized(c['text'])!=stepmap[c['step']] for c in reference):
                 raise ValueError('Reference workbook steps do not match this script. Use the correct workbook or leave the optional reference empty.')
         checkpoint('matching',step_count=len(steps),media_count=len(library.videos))
-        results=match_steps(index,steps,settings,api_key=config['OPENAI_API_KEY'])
+        def matching_progress(done,total,message):
+            checkpoint('matching',matching_completed=done,matching_total=total,detail=message)
+        results=match_steps(index,steps,settings,api_key=config['OPENAI_API_KEY'],progress=matching_progress)
         results_to_json(results,folder/'matches.json');results_to_excel(results,folder/'matches.xlsx')
         store.upload(folder/'matches.json',remote);store.upload(folder/'matches.xlsx',remote)
         checkpoint('narration')
@@ -105,6 +111,7 @@ def run(folder,owner,text,config):
         matcher=Selector(index,library,gateway,folder/'evidence')
         matches=json.loads((folder/'matches.json').read_text());shots=[];issues=[]
         for i,(step,row,audio) in enumerate(zip(steps,matches,audios)):
+            checkpoint('visual_verification',completed_visual_steps=i,total_visual_steps=len(steps),detail=f'Reviewing video frames for step {i+1} of {len(steps)}')
             options=[row.get('best_match'),*row.get('additional_timestamps_same_id',[]),*row.get('alternatives',[])]
             from .sheets import seconds
             suggested=[{'video_id':str(c['journal_id']),'start':seconds(c['start_timestamp']),

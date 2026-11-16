@@ -4,9 +4,9 @@ One hosted interface for a numbered script, fresh JoVE Visualizer matching, Elev
 
 ## Current status
 
-The local source passes 18 checks, including search-order rules, spreadsheet parsing, invitation and owner access, archive traversal, verified asset-part reconstruction, cache invalidation, output-folder validation, actual video rendering, frame counts, and a seven-to-ten-second audio test that preserves a 1 kHz tone's pitch. A headless Streamlit check confirms that missing secure settings keep the application closed before project upload.
+The local source passes 21 checks, including search-order rules, spreadsheet parsing, invitation and owner access, archive traversal, verified asset-part reconstruction, title-cache restoration, bounded network retries, matching progress, cache invalidation, output-folder validation, actual video rendering, frame counts, and a seven-to-ten-second audio test that preserves a 1 kHz tone's pitch. A headless Streamlit check confirms that missing secure settings keep the application closed before project upload.
 
-**Live cloud authentication, provider calls, cloud resource limits, Google Drive upload permissions, and a fresh scientific end-to-end project have not yet been verified.** This is pilot source, not a production-ready release.
+An invited owner has signed in on the hosted app. Private library reads and Shared Drive output writes have passed checks, and the first cloud trial has produced fresh matches and all nine narration files and reached visual review. **A completed scientific MP4, uninvited-account rejection, and full cloud resource suitability remain unverified.** This is pilot source, not a production-ready release.
 
 ## Workflow
 
@@ -47,6 +47,8 @@ Use the new public-source `Tej-128/jove-visualize-studio` repository on branch `
 8. Complete the checks below before inviting further users.
 
 ## Private media library
+
+The private library can also contain `article-title-cache.zip` with a companion `article-title-cache.json`. The descriptor binds its SHA-256 hash to the exact caption-index hash. The ZIP contains only the four permitted `v2_cache` files. This avoids rebuilding thousands of article-title embeddings during the first hosted match. The pilot limits CPU embedding threads to two, reports matching and visual-review step progress, and disables SDK retries inside the already bounded application retry loop. These changes do not lower scientific acceptance thresholds.
 
 An administrator prepares the caption index once using `prepare_library.py`. The runtime never reads a user's Windows folders.
 

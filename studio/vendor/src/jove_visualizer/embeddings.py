@@ -21,6 +21,10 @@ class Embedder(ABC):
 
 class SentenceTransformerEmbedder(Embedder):
     def __init__(self, model_name: str, device: str = "cpu") -> None:
+        if device == 'cpu':
+            import torch
+            # Free hosts can expose more host cores than the container's CPU quota.
+            torch.set_num_threads(2)
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:

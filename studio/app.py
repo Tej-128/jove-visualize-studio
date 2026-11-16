@@ -1,5 +1,10 @@
 """Invite-only hosted pilot. All source media comes from private cloud storage."""
 from pathlib import Path
+import os
+import time
+for _name in ['OMP_NUM_THREADS','OPENBLAS_NUM_THREADS','MKL_NUM_THREADS','NUMEXPR_NUM_THREADS']:
+    os.environ.setdefault(_name,'2')
+os.environ.setdefault('TOKENIZERS_PARALLELISM','false')
 import json
 import re
 import tempfile
@@ -99,6 +104,12 @@ with tabs[1]:
                 st.warning('This runtime no longer has the project. Its saved checkpoints remain in the configured output folder.');return
             st.write('Status: **'+state['status'].replace('_',' ')+'**')
             st.write('Stage: '+state['stage'].replace('_',' '))
+            if state.get('detail'):st.write(state['detail'])
+            st.caption('Last reported activity: '+str(round(time.time()-state.get('updated',state.get('created',0))))+' seconds ago')
+            if state['stage']=='matching' and state.get('matching_total'):
+                st.progress(min(1.,state.get('matching_completed',0)/state['matching_total']),text=f"{state.get('matching_completed',0)} of {state['matching_total']} steps in this matching phase")
+            if state['stage']=='visual_verification' and state.get('total_visual_steps'):
+                st.progress(min(1.,state.get('completed_visual_steps',0)/state['total_visual_steps']),text=f"{state.get('completed_visual_steps',0)} of {state['total_visual_steps']} steps reviewed")
             if state.get('error'):st.error(state['error'])
             if state.get('issues'):
                 st.warning('Review is required before a complete edit can be rendered.')

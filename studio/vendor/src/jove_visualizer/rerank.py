@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -85,7 +86,7 @@ class RerankCache:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.path) as connection:
+        with closing(sqlite3.connect(self.path)) as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS rerank_cache_v3 (
@@ -97,7 +98,7 @@ class RerankCache:
             )
 
     def get(self, key: str) -> AIRerankResponse | None:
-        with sqlite3.connect(self.path) as connection:
+        with closing(sqlite3.connect(self.path)) as connection:
             row = connection.execute(
                 "SELECT response_json FROM rerank_cache_v3 WHERE cache_key = ?", (key,)
             ).fetchone()
@@ -109,7 +110,7 @@ class RerankCache:
             return None
 
     def set(self, key: str, response: AIRerankResponse) -> None:
-        with sqlite3.connect(self.path) as connection:
+        with closing(sqlite3.connect(self.path)) as connection:
             connection.execute(
                 "INSERT OR REPLACE INTO rerank_cache_v3(cache_key, response_json) VALUES (?, ?)",
                 (key, response.model_dump_json()),
@@ -212,7 +213,8 @@ class ScientificReranker:
         client = OpenAI(
             api_key=self.api_key,
             timeout=self.settings.openai_timeout_seconds,
-            max_retries=self.settings.openai_max_retries,
+            # The application retry loop below owns the attempt limit.
+            max_retries=0,
         )
         candidate_payload = []
         for candidate in selected:
