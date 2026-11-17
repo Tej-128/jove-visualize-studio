@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock,patch
 import json
 import unittest
-from pipeline.reconciliation import checked_interval,reconcile_step
+from pipeline.reconciliation import checked_interval,reconcile_step,surrounding_interval
 from pipeline.runner import run_timing,write_json,Jobs
 
 
@@ -15,6 +15,11 @@ def assessment(**changes):
 
 
 class DurationReviewTests(unittest.TestCase):
+    def test_context_proposal_preserves_complete_action_and_never_stretches_video(self):
+        self.assertEqual(surrounding_interval(3,8,0,15,10),(.5,10.5))
+        self.assertEqual(surrounding_interval(1,6,0,11,10),(0,10))
+        self.assertIsNone(surrounding_interval(1,26,0,30,10))
+        self.assertIsNone(surrounding_interval(1,6,0,7,10))
     def test_complete_action_and_verified_context_fit_natural_narration(self):
         result=checked_interval(assessment(),0,12,10)
         self.assertIsNotNone(result)
@@ -30,7 +35,7 @@ class DurationReviewTests(unittest.TestCase):
     def test_duration_is_sent_to_both_visual_reviews_and_saved_audio_is_retained(self):
         shot={'step':1,'text':'Transfer flies.','video_id':'1','start':3.,'end':8.,'tier':'suggested_timestamp',
               'audio_path':'saved.wav','audio_duration':10.,'tempo':2.,'needs_timing_review':True}
-        gateway=Mock();gateway.ask.return_value=assessment()
+        gateway=Mock();gateway.ask.return_value=assessment(start=.5,end=10.5)
         library=SimpleNamespace(video=lambda vid:Path('source.mp4'))
         with TemporaryDirectory() as t,patch('pipeline.reconciliation.duration',return_value=100),\
              patch('pipeline.reconciliation.sample_frames',return_value=[]):

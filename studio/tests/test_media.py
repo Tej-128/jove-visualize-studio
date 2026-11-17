@@ -6,9 +6,25 @@ import numpy as np
 import imageio_ffmpeg
 from fractions import Fraction
 from pipeline.media import execute,retime_audio
-from pipeline.render import render
+from pipeline.render import render,render_review_draft
+from types import SimpleNamespace
+import json
 
 class RealMediaTests(unittest.TestCase):
+    def test_unverified_step_is_a_visible_review_card_in_a_portable_timeline(self):
+        with TemporaryDirectory() as temp:
+            root=Path(temp);audio=root/'saved.wav';out=root/'review';out.mkdir()
+            execute(['-f','lavfi','-i','sine=frequency=440:sample_rate=44100:duration=2','-c:a','pcm_s16le',audio],root/'audio.log')
+            result=render_review_draft([],[SimpleNamespace(number=1,text='Transfer the sample into the next tube.')],
+                                       [{'path':str(audio),'duration':2.}],out)
+            self.assertTrue(result['review_only']);self.assertEqual(result['placeholder_steps'],[1])
+            self.assertEqual(result['verified_steps'],0)
+            count,_=imageio_ffmpeg.count_frames_and_secs(str(out/'preview.mp4'))
+            self.assertEqual(count,result['frames'])
+            plan=json.loads((out/'edit_plan.json').read_text())
+            self.assertEqual(plan['shots'][0]['kind'],'footage_not_verified')
+            self.assertTrue((out/'editable-package.zip').is_file())
+
     def test_seven_to_ten_seconds_preserves_tone_pitch(self):
         with TemporaryDirectory() as temp:
             root=Path(temp);source=root/'source.wav';dest=root/'slower.wav'

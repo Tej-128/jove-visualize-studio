@@ -43,7 +43,7 @@ from pipeline.runner import Jobs
 from pipeline.storage import DriveStore
 
 @st.cache_resource
-def manager(recovery_version='duration-aware-v1'):
+def manager(recovery_version='full-subset-v1'):
     root=Path(tempfile.gettempdir())/'jove-studio-jobs'
     return Jobs(root)
 
@@ -109,7 +109,7 @@ with tabs[1]:
                 st.warning('This runtime no longer has the project. Its saved checkpoints remain in the configured output folder.');return
             st.write('Status: **'+state['status'].replace('_',' ')+'**')
             st.write('Stage: '+state['stage'].replace('_',' '))
-            if state['stage']=='review':st.write('Visual review is complete. Resolve the flagged steps before rendering.')
+            if state['stage']=='review' and not state.get('full_subset_finished'):st.write('Visual review is complete. Resolve the flagged steps before rendering.')
             elif state.get('detail'):st.write(state['detail'])
             st.caption('Last reported activity: '+str(round(time.time()-state.get('updated',state.get('created',0))))+' seconds ago')
             if state['stage']=='matching' and state.get('matching_total'):
@@ -118,11 +118,16 @@ with tabs[1]:
                 st.progress(min(1.,state.get('completed_visual_steps',0)/state['total_visual_steps']),text=f"{state.get('completed_visual_steps',0)} of {state['total_visual_steps']} steps reviewed")
             if state['stage']=='timing' and state.get('timing_total'):
                 st.progress(min(1.,state.get('timing_completed',0)/state['timing_total']),text=f"{state.get('timing_completed',0)} of {state['timing_total']} timing mismatches checked")
+            if state['stage']=='subset_search' and state.get('coverage_total'):
+                st.progress(min(1.,state.get('coverage_completed',0)/state['coverage_total']),text=f"{state.get('coverage_completed',0)} of {state['coverage_total']} videos screened across their full timelines")
+                st.caption('Discovery frames are sampled every three seconds. Candidate actions require a separate dense check.')
             if state.get('error'):st.error(state['error'])
+            if state.get('verification',{}).get('review_only'):
+                st.info('A review MP4 and editable timeline are available below. Unverified steps appear as clearly marked cards. This draft requires footage review.')
             if state['status'] in {'failed','needs_review'}:
                 st.download_button('Download private diagnostics',manager().diagnostics(ident,email),
                     file_name='project-diagnostics.zip',key='download-diagnostics',mime='application/zip')
-                if state['status']=='failed' or state['stage']=='visual_verification':
+                if (state['status']=='failed' and state['stage']!='subset_search') or state['stage']=='visual_verification':
                     st.caption('Continue reuses saved matches, narration and completed frame assessments. It can use more of your existing OpenAI credits, within the configured request limit.')
                     resume_consent=st.checkbox('Continue this saved project using existing credits.',key='resume-consent-'+ident)
                     if st.button('Continue saved project',disabled=not resume_consent,key='resume-'+ident):
@@ -131,7 +136,15 @@ with tabs[1]:
                             manager().resume(ident,email,cfg)
                             st.rerun()
                         except (ValueError,PermissionError) as exc:st.error(str(exc))
-            if state.get('issues'):
+                if not state.get('full_subset_finished'):
+                    st.write('Search the entire supplied video subset, including videos without captions. Saved narration is retained. Earlier candidate selections will be re-evaluated.')
+                    subset_consent=st.checkbox('Screen every supplied video using existing OpenAI credits.',key='subset-consent-'+ident)
+                    if st.button('Complete full video search',disabled=not subset_consent,key='subset-'+ident):
+                        try:
+                            manager().full_subset(ident,email,settings())
+                            st.rerun()
+                        except (ValueError,PermissionError) as exc:st.error(str(exc))
+            if state.get('issues') and state['status'] in {'needs_review','failed'}:
                 st.warning('Review is required before a complete edit can be rendered.')
                 st.dataframe(state['issues'],hide_index=True,use_container_width=True)
                 if state['status']=='needs_review' and state['stage']=='review' and not state.get('timing_attempted'):
@@ -142,7 +155,7 @@ with tabs[1]:
                             manager().resolve_timing(ident,email,settings())
                             st.rerun()
                         except (ValueError,PermissionError) as exc:st.error(str(exc))
-            for name in ['matches.xlsx','report.json','audio-adjustments.json','preview.mp4','editable-package.zip']:
+            for name in ['matches.xlsx','report.json','coverage.json','audio-adjustments.json','preview.mp4','editable-package.zip']:
                 path=manager().file(ident,email,name)
                 if path.is_file():
                     if name=='preview.mp4':st.video(str(path))

@@ -41,7 +41,7 @@ class ModelGateway:
         contents=[{'type':'text','text':json.dumps(payload,ensure_ascii=False)}]
         for im in images:
             contents.extend([{'type':'text','text':f'Source time {im["time"]} seconds'},
-                             {'type':'image_url','image_url':{'url':im['data'],'detail':'low'}}])
+                             {'type':'image_url','image_url':{'url':im['data'],'detail':im.get('detail','low')}}])
         started=time.monotonic()
         try:
             r=self.client.chat.completions.create(model=self.model,messages=[{'role':'system','content':instructions},

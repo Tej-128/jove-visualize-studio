@@ -61,7 +61,44 @@ class Library:
             obj.manifest['title_cache']={**info,'file_id':byname['article-title-cache.zip']['id']}
         obj.videos={v['video_id']:v for v in videos}
         if len(obj.videos)!=len(videos):raise ValueError('More than one source file uses the same video ID')
+        if 'video-overviews.json' in byname:
+            if 'video-overviews.zip' not in byname:raise ValueError('Prepared visual overview upload is incomplete')
+            descriptor=obj.cache/'video-overviews.json'
+            store.download(byname['video-overviews.json']['id'],descriptor)
+            obj.manifest['overview_cache']={**json.loads(descriptor.read_text()),'file_id':byname['video-overviews.zip']['id']}
         return obj
+
+    def restore_overviews(self):
+        item=self.manifest.get('overview_cache')
+        if not item:return
+        from .coverage import VERSION,INTERVAL
+        expected={str(vid):v['sha256'] for vid,v in self.videos.items()}
+        if item.get('version')!=VERSION or item.get('interval')!=INTERVAL or item.get('sources')!=expected:return
+        checksum=item.get('sha256','')
+        if not re.fullmatch('[a-f0-9]{64}',checksum):raise ValueError('Invalid overview archive checksum')
+        folder=self.cache/'full-overviews';folder.mkdir(exist_ok=True)
+        marker=folder/'prepared-overviews.sha256'
+        if marker.exists() and marker.read_text()==checksum:return
+        archive=self.cache/('video-overviews-'+checksum+'.zip')
+        if not archive.exists():self.download_asset(item,archive)
+        with archive.open('rb') as f:
+            if hashlib.file_digest(f,'sha256').hexdigest()!=checksum:raise ValueError('Overview archive checksum mismatch')
+        with zipfile.ZipFile(archive) as z:
+            if sum(i.file_size for i in z.infolist())>500*1024**2:raise ValueError('Overview archive is too large')
+            for entry in z.infolist():
+                parts=entry.filename.split('/')
+                if len(parts)!=3 or parts[0] not in expected or parts[1]!=expected[parts[0]][:16] or not re.fullmatch(r'(?:storyboards\.json|sheet-\d{4}\.jpg)',parts[2]):
+                    raise ValueError('Unexpected prepared overview contents')
+        safe_extract(archive,folder);marker.write_text(checksum)
+
+    def has_prepared_overview(self,video_id):
+        from .coverage import valid_prepared_manifest
+        item=self.videos[str(video_id)]
+        folder=self.cache/'full-overviews'/str(video_id)/item['sha256'][:16]
+        try:
+            manifest=json.loads((folder/'storyboards.json').read_text())
+            return valid_prepared_manifest(manifest,folder)
+        except (OSError,ValueError,KeyError):return False
 
     def download_asset(self,item,dest):
         dest=Path(dest);dest.parent.mkdir(parents=True,exist_ok=True)

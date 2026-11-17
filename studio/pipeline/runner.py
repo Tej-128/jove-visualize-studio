@@ -58,7 +58,7 @@ class Jobs:
 
     def file(self,ident,owner,name):
         self.state(ident,owner)
-        if name not in {'preview.mp4','editable-package.zip','report.json','matches.xlsx','matches.json','state.json','audio-adjustments.json'}:
+        if name not in {'preview.mp4','editable-package.zip','report.json','matches.xlsx','matches.json','state.json','audio-adjustments.json','coverage.json'}:
             raise PermissionError('Unsupported download')
         return self.root/ident/name
 
@@ -110,6 +110,17 @@ class Jobs:
             for path in logs:
                 archive.writestr(str(path.relative_to(folder)),path.read_bytes()[-65536:])
         return output.getvalue()
+
+    def full_subset(self,ident,owner,config):
+        with self.lock:
+            state=self.state(ident,owner)
+            if state['status'] not in {'needs_review','failed'}:raise ValueError('Wait for the current review to finish.')
+            if any(not f.done() for f in self.futures.values()):raise ValueError('A project is already processing.')
+            folder=self.root/ident
+            state.update(status='queued',stage='subset_search',error=None,updated=time.time())
+            write_json(folder/'state.json',state)
+            self.futures[ident]=self.executor.submit(run_full_subset,folder,owner,config)
+        return ident
 
 def run(folder,owner,text,config):
     state=json.loads((folder/'state.json').read_text());store=None;remote=None;index=None
@@ -330,6 +341,137 @@ def run_timing(folder,owner,config):
         print(f"[job {state['id'][:8]}] failed: {json.dumps(failure)}",flush=True)
         state.update(status='failed',error=f'{type(exc).__name__}: timing processing stopped. Download private diagnostics.',updated=time.time())
         write_json(folder/'state.json',state)
+        if store:
+            try:store.upload(folder/'state.json',remote);store.upload(folder/'failure.json',remote)
+            except Exception:pass
+
+
+def run_full_subset(folder,owner,config):
+    """Search every video's full timeline, including videos absent from the caption index."""
+    from .coverage import screen_video,VERSION
+    from .reconciliation import reconcile_step
+    state=json.loads((folder/'state.json').read_text())
+    if state['owner']!=owner:raise PermissionError('This project belongs to another user')
+    store=None;remote=state['output_folder_id'];coverage=None;gateway=None
+    def checkpoint(detail,status='running',stage='subset_search',**extra):
+        state.update(status=status,stage=stage,detail=detail,updated=time.time(),**extra)
+        write_json(folder/'state.json',state)
+        print(f"[job {state['id'][:8]}] {stage}: {detail}",flush=True)
+        if store:store.upload(folder/'state.json',remote)
+    def save_coverage():
+        write_json(folder/'coverage.json',coverage)
+        if store:store.upload(folder/'coverage.json',remote)
+    try:
+        store=DriveStore(config['google_service_account'])
+        checkpoint('Loading every supplied video. Captions are not required for this search.')
+        library=Library.from_folder(store,config['LIBRARY_FOLDER_ID'],folder.parent/'library-cache')
+        if not library.videos:raise ValueError('The media library is empty')
+        library.restore_overviews()
+        text=(folder/'input.txt').read_text(encoding='utf-8')
+        steps=parse_steps_from_text(text);signature=hashlib.sha256(text.encode()).hexdigest()
+        if not steps:raise ValueError('The saved script has no numbered steps')
+        if (folder/'coverage.json').exists():coverage=json.loads((folder/'coverage.json').read_text())
+        if not coverage or coverage.get('script_sha256')!=signature or coverage.get('version')!=VERSION:
+            coverage={'version':VERSION,'script_sha256':signature,'videos':{},'verified_steps':{},'complete':False,
+                      'method':'Full-duration storyboard screening every three seconds, then dense verification of candidate actions. This is not frame-by-frame playback.'}
+        expected={str(vid):item['sha256'] for vid,item in library.videos.items()}
+        # A changed library invalidates coverage and any selections derived from it.
+        if coverage.get('source_hashes')!=expected:
+            coverage.update(source_hashes=expected,videos={},verified_steps={},complete=False)
+        save_coverage()
+        backup=folder/'report-before-full-subset.json'
+        if not backup.exists() and (folder/'report.json').exists():backup.write_bytes((folder/'report.json').read_bytes())
+        gateway=ModelGateway(config['OPENAI_API_KEY'],config.get('VISION_MODEL','gpt-4.1-mini'),int(config.get('MAX_VISION_CALLS',80)),
+                             cache_dir=folder/'subset-review'/'cache',progress=lambda done,limit:checkpoint(state['detail'],vision_requests=done,vision_request_limit=limit))
+        count=len(library.videos)
+        for number,(vid,item) in enumerate(sorted(library.videos.items()),1):
+            old=coverage['videos'].get(str(vid))
+            if old and old.get('source_sha256')==item['sha256'] and old.get('status')=='screened_by_storyboards':continue
+            checkpoint(f'Preparing full-timeline visual evidence for video {number} of {count}.',coverage_completed=len(coverage['videos']),coverage_total=count)
+            path=None if library.has_prepared_overview(vid) else library.video(vid)
+            overview=screen_video(vid,path,item['sha256'],steps,gateway,folder.parent/'library-cache'/'full-overviews',progress=checkpoint)
+            coverage['videos'][str(vid)]=overview;save_coverage()
+            checkpoint(f'Full-timeline storyboard screening completed for {len(coverage["videos"])} of {count} videos.',coverage_completed=len(coverage['videos']),coverage_total=count)
+        if set(coverage['videos'])!=set(expected):raise ValueError('Incomplete media coverage; final selections are blocked')
+        coverage['complete']=True;save_coverage()
+        checkpoint(f'All {count} videos screened across their full timelines. Verifying precise candidate actions.',coverage_complete=True,coverage_completed=count,coverage_total=count)
+        candidates=[c for v in coverage['videos'].values() for c in v['candidates']]
+        if (folder/'reference.xlsx').exists():
+            from .sheets import read_candidates
+            rejected=[c for c in read_candidates((folder/'reference.xlsx').read_bytes()) if re.search(r'not accurate|inaccurate|incorrect|reject|wrong',c['feedback'],re.I)]
+            candidates=[c for c in candidates if not any(c['step']==r['step'] and c['video_id']==r['video_id'] and c['start']<r['end'] and c['end']>r['start'] for r in rejected)]
+        protocol=[{'step':s.number,'text':s.text} for s in steps]
+        preferred={}
+        if (folder/'matches.json').exists():
+            from .sheets import seconds
+            for row in json.loads((folder/'matches.json').read_text()):
+                options=[row.get('best_match'),*row.get('additional_timestamps_same_id',[]),*row.get('alternatives',[])]
+                preferred[row['step_number']]=[{'video_id':str(c['journal_id']),'start':seconds(c['start_timestamp']),'end':seconds(c['end_timestamp'])} for c in options if c]
+        def priority(candidate):
+            options=preferred.get(candidate['step'],[])
+            if any(candidate['video_id']==c['video_id'] and candidate['start']<c['end'] and candidate['end']>c['start'] for c in options):return 0
+            if any(candidate['video_id']==c['video_id'] for c in options):return 1
+            return 2
+        issues=[];shots=[];attempts=[]
+        for i,step in enumerate(steps):
+            audio_path=folder/f'narration-{i+1:03}.wav';info_path=audio_path.with_suffix('.json')
+            if not audio_path.exists() or not info_path.exists():raise ValueError('Saved narration is missing; finish narration before full-subset recovery.')
+            audio=json.loads(info_path.read_text())
+            from .tts_preprocessor import prepare_script_for_tts
+            if audio.get('spoken')!='\n\n'.join(prepare_script_for_tts(step.text)[0]):raise ValueError('Saved narration does not match this script')
+            saved=coverage['verified_steps'].get(str(step.number))
+            if saved is None:
+                ranked=sorted([c for c in candidates if c['step']==step.number],key=lambda c:(priority(c),bool(c.get('critical_uncertainties')),-c['confidence']))
+                # Avoid repeated near-identical windows; no fixed per-video shortlist cap.
+                options=[]
+                for c in ranked:
+                    if any(c['video_id']==o['video_id'] and abs(c['start']-o['start'])<3 for o in options):continue
+                    options.append(c)
+                chosen=None
+                for option in options:
+                    base={**option,'step':step.number,'text':step.text,'audio_path':str(audio_path),'audio_duration':audio['duration']}
+                    chosen,observed=reconcile_step(step,base,[],audio['duration'],library,gateway,folder/'subset-evidence',progress=checkpoint,protocol=protocol)
+                    attempts.extend(observed)
+                    if chosen:break
+                saved={'selection':chosen,'attempts':[a for a in attempts if a.get('step')==step.number]}
+                coverage['verified_steps'][str(step.number)]=saved;save_coverage()
+            if saved['selection']:shots.append(saved['selection'])
+            else:issues.append({'step':step.number,'reason':f'No scientifically compatible complete action with natural narration timing was verified after screening all {count} supplied videos.'})
+            report={'issues':issues,'selected':shots,'attempts':[a for v in coverage['verified_steps'].values() for a in v['attempts']],
+                    'model_requests':gateway.prior_calls+gateway.calls,'coverage_complete':True,'coverage_total':count,
+                    'review_method':'Full-duration sparse storyboard screening, then dense sampled-frame verification. Final scientific and playback review remains required.'}
+            write_json(folder/'report.json',report);store.upload(folder/'report.json',remote)
+            checkpoint(f'Precise action verification completed for {i+1} of {len(steps)} steps.',subset_steps_completed=i+1,subset_steps_total=len(steps))
+        for i in pacing_outliers([s['tempo'] for s in shots]):issues.append({'step':shots[i]['step'],'reason':'Adjacent narration pacing requires review.'})
+        report['issues']=issues;write_json(folder/'report.json',report);store.upload(folder/'report.json',remote)
+        if issues:
+            checkpoint(f'All {count} videos screened. Rendering a review draft with clearly marked cards for unresolved steps.',stage='assembly',issues=issues)
+            for shot in shots:shot['path']=str(library.video(shot['video_id']))
+            audios=[]
+            for i,step in enumerate(steps):
+                wav=folder/f'narration-{i+1:03}.wav';info=json.loads(wav.with_suffix('.json').read_text())
+                audios.append({'path':str(wav),'duration':info['duration']})
+            from .render import render_review_draft
+            verification=render_review_draft(shots,steps,audios,folder)
+            report['draft_contains_placeholders']=True;report['placeholder_steps']=verification['placeholder_steps']
+            write_json(folder/'report.json',report);store.upload(folder/'report.json',remote)
+            for name in ['preview.mp4','editable-package.zip','edit_plan.json']:store.upload(folder/name,remote)
+            checkpoint(f'Review draft rendered: {len(shots)} of {len(steps)} steps use verified selections. Unresolved steps are visibly marked; this is not a finished production edit.',status='needs_review',stage='review',issues=issues,full_subset_finished=True,timing_attempted=True,verification=verification);return
+        for shot in shots:
+            shot['path']=str(library.video(shot['video_id']))
+            shot['audio_path']=str(folder/f'narration-{next(i for i,s in enumerate(steps) if s.number==shot["step"])+1:03}.wav')
+        checkpoint('All steps have compatible selections. Rendering the preview and editable timeline.',stage='assembly',issues=[])
+        verification=render(shots,folder)
+        for name in ['preview.mp4','editable-package.zip','edit_plan.json']:store.upload(folder/name,remote)
+        checkpoint('Draft rendered. Review scientific fit and complete playback before production use.',status='complete',stage='complete',verification=verification,full_subset_finished=True)
+    except VisionBudgetExceeded:
+        if coverage:save_coverage()
+        checkpoint('Full-subset review paused at its request limit. Completed videos and assessments are saved.',status='needs_review',stage='subset_search')
+    except Exception as exc:
+        trace=[{'file':Path(f.filename).name,'line':f.lineno,'function':f.name} for f in traceback.extract_tb(exc.__traceback__)]
+        failure={'exception':type(exc).__name__,'stage':state.get('stage'),'trace':trace}
+        write_json(folder/'failure.json',failure);print(f"[job {state['id'][:8]}] failed: {json.dumps(failure)}",flush=True)
+        state.update(status='failed',error=f'{type(exc).__name__}: full-subset processing stopped. Download private diagnostics.',updated=time.time());write_json(folder/'state.json',state)
         if store:
             try:store.upload(folder/'state.json',remote);store.upload(folder/'failure.json',remote)
             except Exception:pass
