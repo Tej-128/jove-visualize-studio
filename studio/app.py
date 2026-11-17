@@ -43,7 +43,9 @@ from pipeline.runner import Jobs
 from pipeline.storage import DriveStore
 
 @st.cache_resource
-def manager():return Jobs(Path(tempfile.gettempdir())/'jove-studio-jobs')
+def manager():
+    root=Path(tempfile.gettempdir())/'jove-studio-jobs'
+    return Jobs(root)
 
 def settings():
     keys=['OPENAI_API_KEY','ELEVENLABS_API_KEY','google_service_account','LIBRARY_FOLDER_ID','OUTPUT_FOLDER_ID']
