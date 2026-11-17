@@ -6,11 +6,19 @@ import numpy as np
 import imageio_ffmpeg
 from fractions import Fraction
 from pipeline.media import execute,retime_audio
-from pipeline.render import render,render_review_draft
+from pipeline.render import render,render_review_draft,audio_adjustments_from_plan
 from types import SimpleNamespace
 import json
 
 class RealMediaTests(unittest.TestCase):
+    def test_audio_report_uses_the_exported_frame_clock_and_marks_placeholders(self):
+        plan={'fps':'30000/1001','shots':[{'step':1,'timeline_start_frame':0,'timeline_end_frame':300,
+            'audio_duration':10,'start':.2,'end':10.2,'video_id':'review-placeholder','kind':'footage_not_verified'}]}
+        result=audio_adjustments_from_plan(plan)[0]
+        self.assertAlmostEqual(result['timeline_seconds'],10.01)
+        self.assertAlmostEqual(result['tempo'],10/10.01)
+        self.assertIsNone(result['selected_video_seconds']);self.assertTrue(result['review'])
+
     def test_unverified_step_is_a_visible_review_card_in_a_portable_timeline(self):
         with TemporaryDirectory() as temp:
             root=Path(temp);audio=root/'saved.wav';out=root/'review';out.mkdir()

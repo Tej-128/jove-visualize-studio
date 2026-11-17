@@ -11,6 +11,19 @@ from .timing import allocate_frames
 
 def p(parent,key,value):ET.SubElement(parent,'property',name=key).text=str(value)
 
+
+def audio_adjustments_from_plan(plan):
+    rate=float(Fraction(plan['fps']));rows=[]
+    for shot in plan['shots']:
+        seconds=(shot['timeline_end_frame']-shot['timeline_start_frame'])/rate
+        if seconds<=0:raise ValueError('Invalid timeline duration')
+        placeholder=shot.get('kind')=='footage_not_verified'
+        rows.append({'step':shot['step'],'original_audio_seconds':shot['audio_duration'],'timeline_seconds':seconds,
+                     'selected_video_seconds':None if placeholder else shot['end']-shot['start'],
+                     'tempo':shot['audio_duration']/seconds,'review':placeholder,'video_id':shot['video_id'],
+                     'kind':'review_placeholder' if placeholder else 'verified_selection'})
+    return rows
+
 def build_mlt(folder,shots,total,fps,width,height):
     root=ET.Element('mlt',producer='tractor',LC_NUMERIC='C')
     ET.SubElement(root,'profile',description='JoVE Pipeline',width=str(width),height=str(height),

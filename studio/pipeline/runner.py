@@ -60,7 +60,12 @@ class Jobs:
         self.state(ident,owner)
         if name not in {'preview.mp4','editable-package.zip','report.json','matches.xlsx','matches.json','state.json','audio-adjustments.json','coverage.json'}:
             raise PermissionError('Unsupported download')
-        return self.root/ident/name
+        path=self.root/ident/name
+        plan=path.parent/'edit_plan.json'
+        if name=='audio-adjustments.json' and plan.exists() and (not path.exists() or path.stat().st_mtime<plan.stat().st_mtime):
+            from .render import audio_adjustments_from_plan
+            write_json(path,audio_adjustments_from_plan(json.loads(plan.read_text())))
+        return path
 
     def recent(self,owner):
         projects=[]
@@ -348,8 +353,8 @@ def run_timing(folder,owner,config):
 
 def run_full_subset(folder,owner,config):
     """Search every video's full timeline, including videos absent from the caption index."""
-    from .coverage import screen_video,VERSION
-    from .reconciliation import reconcile_step
+    from .coverage import screen_video,suggested_candidates,VERSION
+    from .reconciliation import reconcile_step,VERIFICATION_VERSION
     state=json.loads((folder/'state.json').read_text())
     if state['owner']!=owner:raise PermissionError('This project belongs to another user')
     store=None;remote=state['output_folder_id'];coverage=None;gateway=None
@@ -378,6 +383,9 @@ def run_full_subset(folder,owner,config):
         # A changed library invalidates coverage and any selections derived from it.
         if coverage.get('source_hashes')!=expected:
             coverage.update(source_hashes=expected,videos={},verified_steps={},complete=False)
+        if coverage.get('verification_version')!=VERIFICATION_VERSION:
+            if coverage.get('verified_steps'):write_json(folder/f'coverage-before-verification-v{VERIFICATION_VERSION}.json',coverage)
+            coverage.update(verification_version=VERIFICATION_VERSION,verified_steps={})
         save_coverage()
         backup=folder/'report-before-full-subset.json'
         if not backup.exists() and (folder/'report.json').exists():backup.write_bytes((folder/'report.json').read_bytes())
@@ -396,18 +404,29 @@ def run_full_subset(folder,owner,config):
         coverage['complete']=True;save_coverage()
         checkpoint(f'All {count} videos screened across their full timelines. Verifying precise candidate actions.',coverage_complete=True,coverage_completed=count,coverage_total=count)
         candidates=[c for v in coverage['videos'].values() for c in v['candidates']]
+        rejected=[]
         if (folder/'reference.xlsx').exists():
             from .sheets import read_candidates
-            rejected=[c for c in read_candidates((folder/'reference.xlsx').read_bytes()) if re.search(r'not accurate|inaccurate|incorrect|reject|wrong',c['feedback'],re.I)]
-            candidates=[c for c in candidates if not any(c['step']==r['step'] and c['video_id']==r['video_id'] and c['start']<r['end'] and c['end']>r['start'] for r in rejected)]
+            refs=read_candidates((folder/'reference.xlsx').read_bytes())
+            stepmap={s.number:re.sub(r'\W+',' ',s.text).strip().lower() for s in steps}
+            if any(r['step'] not in stepmap or re.sub(r'\W+',' ',r['text']).strip().lower()!=stepmap[r['step']] for r in refs):
+                raise ValueError('Reviewed timestamps do not match this script.')
+            rejected=[c for c in refs if re.search(r'not accurate|inaccurate|incorrect|reject|wrong',c['feedback'],re.I)]
+            for c in refs:
+                if c not in rejected and c['video_id'] in library.videos:candidates.append({**c,'tier':'reviewed_timestamp','confidence':1.,'critical_uncertainties':[]})
         protocol=[{'step':s.number,'text':s.text} for s in steps]
         preferred={}
         if (folder/'matches.json').exists():
             from .sheets import seconds
-            for row in json.loads((folder/'matches.json').read_text()):
+            original_rows=json.loads((folder/'matches.json').read_text())
+            candidates.extend(suggested_candidates(original_rows,set(library.videos)))
+            for row in original_rows:
                 options=[row.get('best_match'),*row.get('additional_timestamps_same_id',[]),*row.get('alternatives',[])]
                 preferred[row['step_number']]=[{'video_id':str(c['journal_id']),'start':seconds(c['start_timestamp']),'end':seconds(c['end_timestamp'])} for c in options if c]
+        candidates=[c for c in candidates if not any(c['step']==r['step'] and c['video_id']==r['video_id'] and c['start']<r['end'] and c['end']>r['start'] for r in rejected)]
         def priority(candidate):
+            if candidate.get('tier')=='reviewed_timestamp':return -2
+            if candidate.get('tier')=='suggested_timestamp':return -1
             options=preferred.get(candidate['step'],[])
             if any(candidate['video_id']==c['video_id'] and candidate['start']<c['end'] and candidate['end']>c['start'] for c in options):return 0
             if any(candidate['video_id']==c['video_id'] for c in options):return 1
@@ -430,7 +449,7 @@ def run_full_subset(folder,owner,config):
                 chosen=None
                 for option in options:
                     base={**option,'step':step.number,'text':step.text,'audio_path':str(audio_path),'audio_duration':audio['duration']}
-                    chosen,observed=reconcile_step(step,base,[],audio['duration'],library,gateway,folder/'subset-evidence',progress=checkpoint,protocol=protocol)
+                    chosen,observed=reconcile_step(step,base,[],audio['duration'],library,gateway,folder/'subset-evidence',progress=checkpoint,protocol=protocol,caption_lookup=library.caption_context)
                     attempts.extend(observed)
                     if chosen:break
                 saved={'selection':chosen,'attempts':[a for a in attempts if a.get('step')==step.number]}
@@ -453,16 +472,20 @@ def run_full_subset(folder,owner,config):
                 audios.append({'path':str(wav),'duration':info['duration']})
             from .render import render_review_draft
             verification=render_review_draft(shots,steps,audios,folder)
+            from .render import audio_adjustments_from_plan
+            write_json(folder/'audio-adjustments.json',audio_adjustments_from_plan(json.loads((folder/'edit_plan.json').read_text())))
             report['draft_contains_placeholders']=True;report['placeholder_steps']=verification['placeholder_steps']
             write_json(folder/'report.json',report);store.upload(folder/'report.json',remote)
-            for name in ['preview.mp4','editable-package.zip','edit_plan.json']:store.upload(folder/name,remote)
+            for name in ['preview.mp4','editable-package.zip','edit_plan.json','audio-adjustments.json']:store.upload(folder/name,remote)
             checkpoint(f'Review draft rendered: {len(shots)} of {len(steps)} steps use verified selections. Unresolved steps are visibly marked; this is not a finished production edit.',status='needs_review',stage='review',issues=issues,full_subset_finished=True,timing_attempted=True,verification=verification);return
         for shot in shots:
             shot['path']=str(library.video(shot['video_id']))
             shot['audio_path']=str(folder/f'narration-{next(i for i,s in enumerate(steps) if s.number==shot["step"])+1:03}.wav')
         checkpoint('All steps have compatible selections. Rendering the preview and editable timeline.',stage='assembly',issues=[])
         verification=render(shots,folder)
-        for name in ['preview.mp4','editable-package.zip','edit_plan.json']:store.upload(folder/name,remote)
+        from .render import audio_adjustments_from_plan
+        write_json(folder/'audio-adjustments.json',audio_adjustments_from_plan(json.loads((folder/'edit_plan.json').read_text())))
+        for name in ['preview.mp4','editable-package.zip','edit_plan.json','audio-adjustments.json']:store.upload(folder/name,remote)
         checkpoint('Draft rendered. Review scientific fit and complete playback before production use.',status='complete',stage='complete',verification=verification,full_subset_finished=True)
     except VisionBudgetExceeded:
         if coverage:save_coverage()

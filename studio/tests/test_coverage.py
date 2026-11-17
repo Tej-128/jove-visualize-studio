@@ -8,13 +8,35 @@ from pipeline.media import execute
 from pipeline.runner import Jobs,run_full_subset,write_json
 from pipeline.providers import VisionBudgetExceeded
 from pipeline.coverage import valid_prepared_manifest
+from pipeline.coverage import suggested_candidates
 from pipeline.library import Library
 import json
 import hashlib
 import zipfile
+import sqlite3
 
 
 class CoverageTests(unittest.TestCase):
+    def test_original_timestamps_survive_missing_storyboard_discovery_but_unavailable_sources_do_not(self):
+        row={'step_number':1,'best_match':{'journal_id':'1','start_timestamp':'02:26','end_timestamp':'02:35','caption_passage':'Transfer flies.','confidence_score':.9},
+             'alternatives':[{'journal_id':'absent','start_timestamp':'00:01','end_timestamp':'00:05'}]}
+        candidates=suggested_candidates([row],{'1'})
+        self.assertEqual(len(candidates),1)
+        self.assertEqual((candidates[0]['start'],candidates[0]['end']),(146,155))
+        self.assertEqual(candidates[0]['tier'],'suggested_timestamp')
+
+    def test_source_captions_ground_the_actual_interval_and_missing_captions_do_not_error(self):
+        with TemporaryDirectory() as t:
+            root=Path(t)
+            with sqlite3.connect(root/'corpus.sqlite') as db:
+                db.execute('CREATE TABLE passages(article_id TEXT,start_ms INTEGER,end_ms INTEGER,text TEXT)')
+                db.executemany('INSERT INTO passages VALUES(?,?,?,?)',[('1',10000,20000,'Draw the line on the tube.'),('1',100000,120000,'Analyze software distances.'),('2',10000,20000,'Unrelated specimen.')])
+            db.close()
+            lib=object.__new__(Library);lib.index=lambda:root
+            self.assertEqual(lib.caption_context('1',12,18)[0]['text'],'Draw the line on the tube.')
+            self.assertEqual(lib.caption_context('missing',12,18),[])
+            self.assertEqual(lib.caption_context("1' OR 1=1 --",12,18),[])
+
     def test_prepared_overviews_are_bound_to_source_hashes_and_cannot_reference_other_files(self):
         with TemporaryDirectory() as t:
             root=Path(t);archive=root/'source.zip';source_sha='a'*64
@@ -45,11 +67,14 @@ class CoverageTests(unittest.TestCase):
         videos={str(i):{'sha256':str(i).zfill(64)} for i in range(1,31)}
         lib=SimpleNamespace(videos=videos,video=lambda ident:Path('source-'+ident+'.mp4'),restore_overviews=lambda:None,has_prepared_overview=lambda ident:False)
         config={'google_service_account':{},'LIBRARY_FOLDER_ID':'library','OPENAI_API_KEY':'test'}
+        def review(verified,steps,audios,destination):
+            write_json(Path(destination)/'edit_plan.json',{'fps':'30','shots':[{'step':1,'timeline_start_frame':0,'timeline_end_frame':60,'audio_duration':2.,'start':.2,'end':2.2,'video_id':'review-placeholder','kind':'footage_not_verified'}]})
+            return {'placeholder_steps':[1],'review_only':True}
         with patch('pipeline.runner.DriveStore'),patch('pipeline.runner.Library') as factory,\
              patch('pipeline.runner.ModelGateway',return_value=SimpleNamespace(calls=[],prior_calls=[])),\
              patch('pipeline.runner.CorpusIndex') as index,patch('pipeline.runner.generate_step_audio') as tts,\
              patch('pipeline.coverage.screen_video',side_effect=screen),patch('pipeline.runner.render') as render,\
-             patch('pipeline.render.render_review_draft',return_value={'placeholder_steps':[1],'review_only':True}):
+             patch('pipeline.render.render_review_draft',side_effect=review):
             factory.from_folder.return_value=lib
             run_full_subset(folder,'a@example.test',config)
             index.assert_not_called();tts.assert_not_called();render.assert_not_called()

@@ -15,6 +15,17 @@ def assessment(**changes):
 
 
 class DurationReviewTests(unittest.TestCase):
+    def test_only_numbers_required_by_the_script_can_create_a_numeric_blocker(self):
+        unspecified=assessment(critical_uncertainties=[{'requirement_quote':'defined height','constraint_type':'explicit_quantity','issue':'Exact numeric height not visible.'}])
+        self.assertIsNotNone(checked_interval(unspecified,0,12,10,script_text='Mark a scoring region at a defined height.'))
+        self.assertTrue(unspecified['notes'])
+        specified=assessment(critical_uncertainties=[{'requirement_quote':'20 individuals','constraint_type':'explicit_quantity','issue':'Count not visible.'}])
+        self.assertIsNone(checked_interval(specified,0,12,10,script_text='Group 20 individuals.'))
+        missing_action=assessment(critical_uncertainties=[{'requirement_quote':'mark a region','constraint_type':'visible_action','issue':'Marking is absent.'}])
+        self.assertIsNone(checked_interval(missing_action,0,12,10,script_text='Position the tube and mark a region.'))
+        invented=assessment(critical_uncertainties=[{'requirement_quote':'wait exactly 60 seconds','constraint_type':'explicit_quantity','issue':'Wait not timed.'}])
+        self.assertIsNone(checked_interval(invented,0,12,10,script_text='Allow brief acclimation.'))
+
     def test_context_proposal_preserves_complete_action_and_never_stretches_video(self):
         self.assertEqual(surrounding_interval(3,8,0,15,10),(.5,10.5))
         self.assertEqual(surrounding_interval(1,6,0,11,10),(0,10))

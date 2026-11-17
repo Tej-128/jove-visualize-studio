@@ -100,6 +100,16 @@ class Library:
             return valid_prepared_manifest(manifest,folder)
         except (OSError,ValueError,KeyError):return False
 
+    def caption_context(self,video_id,start,end):
+        import sqlite3
+        database=self.index()/'corpus.sqlite'
+        connection=sqlite3.connect('file:'+database.as_posix()+'?mode=ro',uri=True)
+        try:
+            rows=connection.execute('SELECT start_ms,end_ms,text FROM passages WHERE article_id=? AND end_ms>=? AND start_ms<=? ORDER BY start_ms LIMIT 12',
+                                    (str(video_id),max(0,(start-5)*1000),(end+5)*1000)).fetchall()
+            return [{'start':a/1000,'end':b/1000,'text':text} for a,b,text in rows]
+        finally:connection.close()
+
     def download_asset(self,item,dest):
         dest=Path(dest);dest.parent.mkdir(parents=True,exist_ok=True)
         if 'parts' not in item:return self.store.download(item['file_id'],dest)
