@@ -121,6 +121,29 @@ class SearchOrderTests(unittest.TestCase):
     def test_missing_match_is_not_invented(self):
         s=self.selector();self.assertIsNone(s.select(SimpleNamespace(number=1),[{'video_id':'1'}],3))
 
+    def test_valid_suggested_footage_with_timing_mismatch_does_not_trigger_wider_search(self):
+        s=self.selector()
+        original=s.inspect
+        def inspect(step,candidate,tier,audio):
+            original(step,candidate,tier,audio)
+            return {'needs_timing_review':True,'confidence':.95,'tempo':.7,'step':step.number}
+        s.inspect=inspect
+        chosen=s.select(SimpleNamespace(number=1),[{'video_id':'1'},{'video_id':'2'}],7)
+        self.assertTrue(chosen['needs_timing_review'])
+        self.assertEqual(s.attempts,[('suggested_timestamp','1'),('suggested_timestamp','2')])
+
+    def test_valid_action_in_suggested_video_is_retained_before_global_search(self):
+        s=self.selector()
+        original=s.inspect
+        def inspect(step,candidate,tier,audio):
+            original(step,candidate,tier,audio)
+            if tier=='full_suggested_video':
+                return {'needs_timing_review':True,'confidence':.95,'tempo':1.4,'step':step.number}
+        s.inspect=inspect
+        chosen=s.select(SimpleNamespace(number=1),[{'video_id':'1'}],7)
+        self.assertTrue(chosen['needs_timing_review'])
+        self.assertEqual(s.attempts,[('suggested_timestamp','1'),('full_suggested_video','1')])
+
 class AccessTests(unittest.TestCase):
     def test_recovery_and_diagnostics_remain_owner_scoped(self):
         from pipeline.runner import Jobs,write_json

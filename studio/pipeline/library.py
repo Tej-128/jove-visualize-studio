@@ -3,8 +3,11 @@ import json
 import re
 import shutil
 import zipfile
+import threading
 from pathlib import Path
 from .storage import safe_extract
+
+VIDEO_CACHE_LOCK=threading.RLock()
 
 class Library:
     def __init__(self,store,manifest_id,cache):
@@ -155,6 +158,9 @@ class Library:
         marker.write_text(expected)
 
     def video(self,video_id):
+        with VIDEO_CACHE_LOCK:return self._video(video_id)
+
+    def _video(self,video_id):
         item=self.videos[str(video_id)]
         expected=item.get('sha256')
         if not expected:raise ValueError('Source video must have a recorded checksum')

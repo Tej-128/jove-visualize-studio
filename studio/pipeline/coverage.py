@@ -87,7 +87,7 @@ def storyboards(path,folder,interval=INTERVAL):
     return manifest
 
 
-def screen_video(video_id,path,source_hash,steps,gateway,folder,progress=None):
+def screen_video(video_id,path,source_hash,steps,gateway,folder,progress=None,rules=None):
     folder=Path(folder)/str(video_id)/source_hash[:16]
     manifest=storyboards(path,folder)
     candidates=[];summaries=[]
@@ -97,7 +97,7 @@ def screen_video(video_id,path,source_hash,steps,gateway,folder,progress=None):
         if progress:progress(f'Video {video_id}: screening storyboard batch {number} of {total_batches}')
         start=group[0]['start'];end=group[-1]['end']
         images=[{'time':s['start'],'data':'data:image/jpeg;base64,'+base64.b64encode((folder/s['file']).read_bytes()).decode(),'detail':'high'} for s in group]
-        result=gateway.ask(RULES,{'script':[{'step':s.number,'text':s.text} for s in steps],
+        result=gateway.ask(rules or RULES,{'script':[{'step':s.number,'text':s.text} for s in steps],
                                  'video_id':str(video_id),'range_start':start,'range_end':end,
                                  'sample_spacing_seconds':manifest['interval']},images)
         summaries.append({'start':start,'end':end,'summary':str(result.get('summary',''))})

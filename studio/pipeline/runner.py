@@ -1,6 +1,6 @@
 from pathlib import Path
 from dataclasses import asdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor,as_completed
 from fractions import Fraction
 import hashlib
 import json
@@ -64,7 +64,8 @@ class Jobs:
         plan=path.parent/'edit_plan.json'
         if name=='audio-adjustments.json' and plan.exists() and (not path.exists() or path.stat().st_mtime<plan.stat().st_mtime):
             from .render import audio_adjustments_from_plan
-            write_json(path,audio_adjustments_from_plan(json.loads(plan.read_text())))
+            saved=json.loads(plan.read_text())
+            write_json(path,saved['audio_adjustments'] if 'audio_adjustments' in saved else audio_adjustments_from_plan(saved))
         return path
 
     def recent(self,owner):
@@ -76,6 +77,36 @@ class Jobs:
                 if state.get('owner')==owner:projects.append(state)
             except (OSError,ValueError):continue
         return sorted(projects,key=lambda s:s.get('created',0),reverse=True)
+
+    def restore_latest(self,owner,config):
+        """Restore only signed checkpoints for this invited owner after host loss."""
+        from .checkpoints import valid
+        store=DriveStore(config['google_service_account'])
+        folders=[f for f in store.children(config['OUTPUT_FOLDER_ID']) if re.fullmatch(r'job-[a-f0-9]{32}',f['name'])]
+        for remote in sorted(folders,key=lambda f:f.get('createdTime',''),reverse=True)[:20]:
+            files=store.children(remote['id']);states=[f for f in files if f['name']=='state.json']
+            if not states:continue
+            item=max(states,key=lambda f:f.get('modifiedTime',f.get('createdTime','')))
+            try:
+                state=store.request('GET','https://www.googleapis.com/drive/v3/files/'+item['id'],params={'alt':'media','supportsAllDrives':'true'}).json()
+                if state.get('owner')!=owner or not re.fullmatch('[a-f0-9]{32}',state.get('id','')) or remote['name']!='job-'+state['id'] or not valid(state,config):continue
+                folder=self.root/state['id'];folder.mkdir(exist_ok=True)
+                newest={}
+                for f in sorted(files,key=lambda f:f.get('modifiedTime',f.get('createdTime',''))):newest[f['name']]=f
+                if 'input.txt' not in newest:continue
+                store.download(newest['input.txt']['id'],folder/'input.txt')
+                if hashlib.sha256((folder/'input.txt').read_bytes()).hexdigest()!=state['input_sha256']:continue
+                for name,f in newest.items():
+                    if name in {'matches.json','matches.xlsx','report.json','preview.mp4','editable-package.zip','audio-adjustments.json','edit_plan.json'} or re.fullmatch(r'narration-\d{3}\.(?:wav|json)',name):
+                        store.download(f['id'],folder/name)
+                    elif name=='selections.json':
+                        (folder/'automatic').mkdir(exist_ok=True);store.download(f['id'],folder/'automatic'/name)
+                if state['status'] in {'running','queued'}:
+                    state.update(status='needs_review',detail='The host restarted. Saved matching, narration and selections are restored; rebuild to continue.')
+                state['restored_from_cloud']=True;write_json(folder/'state.json',state)
+                return state['id']
+            except (ValueError,KeyError,OSError):continue
+        return None
 
     def resume(self,ident,owner,config):
         with self.lock:
@@ -122,17 +153,35 @@ class Jobs:
             if state['status'] not in {'needs_review','failed'}:raise ValueError('Wait for the current review to finish.')
             if any(not f.done() for f in self.futures.values()):raise ValueError('A project is already processing.')
             folder=self.root/ident
-            state.update(status='queued',stage='subset_search',error=None,updated=time.time())
+            state.update(status='queued',stage='subset_search',error=None,full_subset_finished=False,verification=None,updated=time.time())
             write_json(folder/'state.json',state)
             self.futures[ident]=self.executor.submit(run_full_subset,folder,owner,config)
         return ident
 
+    def requires_subset_recheck(self,ident,owner):
+        self.state(ident,owner)
+        from .reconciliation import VERIFICATION_VERSION
+        from .coverage import VERSION
+        try:
+            saved=json.loads((self.root/ident/'coverage.json').read_text())
+            return saved.get('version')!=VERSION or saved.get('verification_version')!=VERIFICATION_VERSION
+        except (OSError,ValueError):return True
+
 def run(folder,owner,text,config):
+    config={**config,'_PIPELINE_STARTED':time.monotonic()}
     state=json.loads((folder/'state.json').read_text());store=None;remote=None;index=None
+    if state['owner']!=owner:raise PermissionError('This project belongs to another user')
+    from .checkpoints import signature
+    if not (folder/'input.txt').exists():(folder/'input.txt').write_text(text,encoding='utf-8')
+    state['input_sha256']=hashlib.sha256((folder/'input.txt').read_bytes()).hexdigest()
+    state['checkpoint_signature']=signature(state,config)
+    last_flush=0.;last_remote_stage=None
     def checkpoint(stage,status='running',**details):
+        nonlocal last_flush,last_remote_stage
         state.update(stage=stage,status=status,updated=time.time(),**details);write_json(folder/'state.json',state)
         print(f"[job {state['id'][:8]}] {stage}: {details.get('detail',status)}",flush=True)
-        if store and remote:store.upload(folder/'state.json',remote)
+        if store and remote and (stage!=last_remote_stage or status!='running' or time.monotonic()-last_flush>=15):
+            store.upload(folder/'state.json',remote);last_flush=time.monotonic();last_remote_stage=stage
     try:
         store=DriveStore(config['google_service_account'])
         remote=state.get('output_folder_id') or store.folder(config['OUTPUT_FOLDER_ID'],'job-'+state['id'])
@@ -144,8 +193,8 @@ def run(folder,owner,text,config):
         # The pilot never deserializes a remotely supplied trained Python object.
         settings.learned_ranker_enabled=False;settings.reviewer_feedback_enabled=False
         settings.openai_max_concurrency=2
-        settings.openai_timeout_seconds=60
-        settings.openai_max_retries=2
+        settings.openai_timeout_seconds=25
+        settings.openai_max_retries=1
         checkpoint('model_setup',detail='Loading the caption model and prepared title cache')
         index=CorpusIndex(library.index(),settings)
         steps=parse_steps_from_text(text)
@@ -172,9 +221,11 @@ def run(folder,owner,text,config):
             results_to_json(results,folder/'matches.json');results_to_excel(results,folder/'matches.xlsx')
             store.upload(folder/'matches.json',remote);store.upload(folder/'matches.xlsx',remote)
         checkpoint('narration')
-        voice=config['voice'];audios=[]
-        for i,step in enumerate(steps):
+        voice=config['voice'];audios=[None]*len(steps)
+        def narration(item):
+            i,step=item
             path=folder/f'narration-{i+1:03}.wav'
+            generated=False
             if path.exists() and path.with_suffix('.json').exists():
                 info=json.loads(path.with_suffix('.json').read_text())
                 from .tts_preprocessor import prepare_script_for_tts
@@ -184,9 +235,25 @@ def run(folder,owner,text,config):
             else:
                 info=generate_step_audio(step.text,step.previous_text,step.next_text,voice['id'],float(voice['speed']),
                                          config['ELEVENLABS_API_KEY'],path)
-                store.upload(path,remote);store.upload(path.with_suffix('.json'),remote)
-            audios.append({**info,'path':str(path)})
-            checkpoint('narration',completed_audio_steps=i+1)
+                generated=True
+            return i,path,info,generated
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures=[pool.submit(narration,item) for item in enumerate(steps)]
+            for done,future in enumerate(as_completed(futures),1):
+                i,path,info,generated=future.result()
+                if generated:store.upload(path,remote);store.upload(path.with_suffix('.json'),remote)
+                audios[i]={**info,'path':str(path)}
+                checkpoint('narration',completed_audio_steps=done,detail=f'Narration ready for {done} of {len(steps)} steps.')
+        # Whole-library screening is an explicit recovery path. New scripts must
+        # finish suggested timestamps and suggested videos before widening.
+        if config.get('AUTOMATIC_EDITOR',True):
+            run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store,remote)
+            return
+        if config.get('FULL_VISUAL_PIPELINE',False):
+            checkpoint('subset_search',detail='Narration is saved. Starting the complete supplied-video search and action checks.')
+            index.connection.close();index=None
+            run_full_subset(folder,owner,config)
+            return
         checkpoint('visual_verification')
         def vision_progress(done,limit):
             checkpoint('visual_verification',vision_requests=done,vision_request_limit=limit)
@@ -270,6 +337,46 @@ def run(folder,owner,text,config):
             except Exception:pass
     finally:
         if index:index.connection.close()
+
+
+def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store,remote):
+    from .automatic_edit import AutomaticEditor,VERSION
+    from .action_render import render_actions
+    started=time.monotonic()
+    checkpoint('visual_verification',detail='Checking suggested timestamps first. Suitable footage is retained while timing is solved separately.',
+               editor_version=VERSION,verification=None,total_visual_steps=len(steps),completed_visual_steps=0)
+    gateway=ModelGateway(config['OPENAI_API_KEY'],config.get('VISION_MODEL','gpt-4.1-mini'),int(config.get('MAX_VISION_CALLS',80)),
+                         cache_dir=folder/'automatic-cache')
+    audio_map={step.number:audio for step,audio in zip(steps,audios)}
+    def progress(message,**kw):
+        checkpoint('visual_verification',detail=message,vision_requests=len(gateway.calls),**kw)
+        store.upload(folder/'automatic'/'selections.json',remote)
+    remaining=540-(time.monotonic()-config.get('_PIPELINE_STARTED',started))
+    editor=AutomaticEditor(index,library,gateway,folder/'automatic',steps,audio_map,progress=progress,
+        seconds=max(1,min(int(config.get('VISUAL_REVIEW_SECONDS',240)),remaining)),workers=int(config.get('VISUAL_WORKERS',3)))
+    plans=editor.run(json.loads((folder/'matches.json').read_text()))
+    missing=[s.number for s in steps if s.number not in {p['step'] for p in plans}]
+    issues=[{'step':p['step'],'reason':'; '.join(p['missing_actions']+p['unobservable_details']) or 'Illustrative footage requires review.'}
+            for p in plans if p['needs_review']]
+    issues.extend({'step':number,'reason':'No usable related footage was retained. This step is omitted from the partial review edit.'} for number in missing)
+    report={'editor_version':VERSION,'selected':plans,'issues':issues,'omitted_steps':missing,
+            'attempts':editor.attempts,'model_requests':gateway.prior_calls+gateway.calls,
+            'visual_seconds':round(time.monotonic()-started,2),'input_contract':'Plain script only. No reference timestamps or benchmark selections were supplied to this editor.',
+            'review_method':'Suggested ranges, suggested videos, then wider retrieval and visual discovery. Retained uncertainty is explicit.'}
+    write_json(folder/'report.json',report);store.upload(folder/'report.json',remote)
+    checkpoint('assembly',detail=f'Rendering {len(plans)} script steps using real source footage. Narration is retained; review flags stay visible.',issues=issues)
+    result=render_actions(plans,audio_map,library,folder)
+    for row in json.loads((folder/'audio-adjustments.json').read_text()):
+        if not .85<=row['video_speed']<=1.15:
+            issues.append({'step':row['step'],'reason':f"Footage plays at {row['video_speed']:.2f}x to retain the complete selected action and natural narration. Review pacing."})
+    result['review_only']=bool(issues);result['omitted_steps']=missing
+    report.update(issues=issues,verification=result,processing_seconds=round(time.monotonic()-config.get('_PIPELINE_STARTED',started),2),draft_contains_placeholders=False)
+    write_json(folder/'report.json',report)
+    for name in ['report.json','preview.mp4','editable-package.zip','edit_plan.json','audio-adjustments.json']:
+        store.upload(folder/name,remote)
+    checkpoint('review' if issues else 'complete','needs_review' if issues else 'complete',
+               detail=f"MP4 and editable timeline rendered with real footage for {len(plans)} of {len(steps)} steps. No placeholder cards. Review the listed uncertainties before production use.",
+               issues=issues,verification=result,timing_attempted=True,full_subset_finished=True,completed_visual_steps=len(steps))
 
 
 def run_timing(folder,owner,config):

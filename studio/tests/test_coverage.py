@@ -17,6 +17,19 @@ import sqlite3
 
 
 class CoverageTests(unittest.TestCase):
+    def test_changed_verification_rules_offer_recheck_without_invalidating_video_screening(self):
+        from pipeline.coverage import VERSION
+        from pipeline.reconciliation import VERIFICATION_VERSION
+        with TemporaryDirectory() as t:
+            folder=self.make_project(t);jobs=Jobs(t)
+            write_json(folder/'coverage.json',{'version':VERSION,'verification_version':VERIFICATION_VERSION-1,'complete':True,'videos':{'1':{'status':'screened_by_storyboards'}}})
+            self.assertTrue(jobs.requires_subset_recheck(folder.name,'a@example.test'))
+            saved=json.loads((folder/'coverage.json').read_text());self.assertTrue(saved['complete'])
+            saved['verification_version']=VERIFICATION_VERSION;write_json(folder/'coverage.json',saved)
+            self.assertFalse(jobs.requires_subset_recheck(folder.name,'a@example.test'))
+            with self.assertRaises(PermissionError):jobs.requires_subset_recheck(folder.name,'b@example.test')
+            jobs.executor.shutdown()
+
     def test_original_timestamps_survive_missing_storyboard_discovery_but_unavailable_sources_do_not(self):
         row={'step_number':1,'best_match':{'journal_id':'1','start_timestamp':'02:26','end_timestamp':'02:35','caption_passage':'Transfer flies.','confidence_score':.9},
              'alternatives':[{'journal_id':'absent','start_timestamp':'00:01','end_timestamp':'00:05'}]}

@@ -43,7 +43,7 @@ from pipeline.runner import Jobs
 from pipeline.storage import DriveStore
 
 @st.cache_resource
-def manager(recovery_version='full-subset-v2'):
+def manager(recovery_version='automatic-editor-v1'):
     root=Path(tempfile.gettempdir())/'jove-studio-jobs'
     return Jobs(root)
 
@@ -67,12 +67,11 @@ with tabs[0]:
     script_url=None;upload=None
     if mode=='Google Doc link':script_url=st.text_input('Google Doc or Drive document link')
     else:upload=st.file_uploader('Numbered script',type=['docx','txt'])
-    reference=st.file_uploader('Optional reviewed timestamp workbook for this exact script',type=['xlsx'])
     profiles=st.secrets.get('voice_profiles',{})
     if not profiles:
         st.warning('Configure at least one approved voice profile in secure settings.');st.stop()
     profile=st.selectbox('Approved voice profile',list(profiles))
-    st.caption('The approved generation profile is retained. Step audio is adjusted only within the pilot pacing limits; other cases stop for review.')
+    st.caption('Only the script is required. The app finds footage, generates narration and produces a review edit. Any uncertain visuals or substantial timing changes are flagged.')
     consent=st.checkbox('Generate using the configured existing credits and approved private processing services.')
     if st.button('Generate video draft',type='primary',disabled=not consent):
         try:
@@ -89,7 +88,7 @@ with tabs[0]:
                     text+='\n'+'\n'.join(' | '.join(c.text for c in row.cells) for t in d.tables for row in t.rows)
                 else:text=upload.getvalue().decode('utf-8-sig')
             else:raise ValueError('Provide a script first.')
-            ident=manager().submit(email,text,config,reference.getvalue() if reference else None)
+            ident=manager().submit(email,text,config)
             st.session_state['job_id']=ident;st.success('Project started. Open Project status to follow progress.')
         except (ValueError,PermissionError) as e:st.error(str(e))
         except Exception:st.error('Unable to start. Check document access and secure settings in the private server logs.')
@@ -98,6 +97,12 @@ with tabs[1]:
     st.subheader('Your current project')
     ident=st.session_state.get('job_id')
     recent=manager().recent(email)
+    if not recent and not st.session_state.get('restore_attempted'):
+        st.session_state['restore_attempted']=True
+        try:
+            restored=manager().restore_latest(email,settings())
+            if restored:ident=restored;st.session_state['job_id']=restored;recent=manager().recent(email)
+        except Exception:st.info('Saved cloud projects could not be restored automatically. The private Drive checkpoints are retained.')
     if not ident and recent:
         ident=recent[0]['id'];st.session_state['job_id']=ident
     if not ident:st.write('Start a project from Create video.')
@@ -109,7 +114,7 @@ with tabs[1]:
                 st.warning('This runtime no longer has the project. Its saved checkpoints remain in the configured output folder.');return
             st.write('Status: **'+state['status'].replace('_',' ')+'**')
             st.write('Stage: '+state['stage'].replace('_',' '))
-            if state['stage']=='review' and not state.get('full_subset_finished'):st.write('Visual review is complete. Resolve the flagged steps before rendering.')
+            if state['stage']=='review' and not state.get('verification'):st.write('Visual review is complete. Resolve the flagged steps before rendering.')
             elif state.get('detail'):st.write(state['detail'])
             st.caption('Last reported activity: '+str(round(time.time()-state.get('updated',state.get('created',0))))+' seconds ago')
             if state['stage']=='matching' and state.get('matching_total'):
@@ -122,40 +127,24 @@ with tabs[1]:
                 st.progress(min(1.,state.get('coverage_completed',0)/state['coverage_total']),text=f"{state.get('coverage_completed',0)} of {state['coverage_total']} videos screened across their full timelines")
                 st.caption('Discovery frames are sampled every three seconds. Candidate actions require a separate dense check.')
             if state.get('error'):st.error(state['error'])
-            if state.get('verification',{}).get('review_only'):
-                st.info('A review MP4 and editable timeline are available below. Unverified steps appear as clearly marked cards. This draft requires footage review.')
+            if (state.get('verification') or {}).get('review_only'):
+                if (state.get('verification') or {}).get('placeholder_steps'):
+                    st.warning('This older draft contains placeholder cards. Rebuild it with the updated editor below.')
+                else:st.info('A real-footage review MP4 and editable timeline are available below. Review labels identify uncertain visuals or timing changes.')
             if state['status'] in {'failed','needs_review'}:
                 st.download_button('Download private diagnostics',manager().diagnostics(ident,email),
                     file_name='project-diagnostics.zip',key='download-diagnostics',mime='application/zip')
-                if (state['status']=='failed' and state['stage']!='subset_search') or state['stage']=='visual_verification':
-                    st.caption('Continue reuses saved matches, narration and completed frame assessments. It can use more of your existing OpenAI credits, within the configured request limit.')
-                    resume_consent=st.checkbox('Continue this saved project using existing credits.',key='resume-consent-'+ident)
-                    if st.button('Continue saved project',disabled=not resume_consent,key='resume-'+ident):
-                        try:
-                            cfg=settings();cfg['voice']=dict(profiles[profile])
-                            manager().resume(ident,email,cfg)
-                            st.rerun()
-                        except (ValueError,PermissionError) as exc:st.error(str(exc))
-                if not state.get('full_subset_finished'):
-                    st.write('Search the entire supplied video subset, including videos without captions. Saved narration is retained. Earlier candidate selections will be re-evaluated.')
-                    subset_consent=st.checkbox('Screen every supplied video using existing OpenAI credits.',key='subset-consent-'+ident)
-                    if st.button('Complete full video search',disabled=not subset_consent,key='subset-'+ident):
-                        try:
-                            manager().full_subset(ident,email,settings())
-                            st.rerun()
-                        except (ValueError,PermissionError) as exc:st.error(str(exc))
+                if st.button('Rebuild edit from saved script and narration',key='rebuild-'+ident):
+                    try:
+                        cfg=settings();cfg['voice']=dict(profiles[profile])
+                        manager().resume(ident,email,cfg);st.rerun()
+                    except (ValueError,PermissionError) as exc:st.error(str(exc))
             if state.get('issues') and state['status'] in {'needs_review','failed'}:
-                st.warning('Review is required before a complete edit can be rendered.')
+                st.warning('Review the listed visual and timing limitations before production use.')
                 st.dataframe(state['issues'],hide_index=True,use_container_width=True)
-                if state['status']=='needs_review' and state['stage']=='review' and not state.get('timing_attempted'):
-                    st.write('Check complete action ranges and suitable surrounding footage against the saved narration. Compatible selections will render automatically; unresolved cases remain flagged.')
-                    timing_consent=st.checkbox('Check timing using existing OpenAI credits.',key='timing-consent-'+ident)
-                    if st.button('Resolve timing and render',disabled=not timing_consent,key='timing-'+ident):
-                        try:
-                            manager().resolve_timing(ident,email,settings())
-                            st.rerun()
-                        except (ValueError,PermissionError) as exc:st.error(str(exc))
             for name in ['matches.xlsx','report.json','coverage.json','audio-adjustments.json','preview.mp4','editable-package.zip']:
+                if state['status'] in {'running','queued'} and name in {'preview.mp4','editable-package.zip','audio-adjustments.json'}:continue
+                if state.get('editor_version') and not state.get('verification') and name in {'preview.mp4','editable-package.zip','audio-adjustments.json'}:continue
                 path=manager().file(ident,email,name)
                 if path.is_file():
                     if name=='preview.mp4':st.video(str(path))
@@ -167,9 +156,9 @@ with tabs[1]:
 with tabs[2]:
     st.subheader('One connected workflow')
     for n,label in enumerate(['Read the numbered script and production notes','Run fresh Visualizer matching across the caption index',
-        'Generate narration and timing with the approved voice profile','Inspect every suggested timestamp option for each step',
-        'If needed, search the full suggested videos, then the wider accessible library',
-        'Select complete actions with compatible narration pacing','Resolve flagged steps before assembly',
-        'Render MP4 and a portable editable timeline package'],1):st.write(f'{n}. {label}')
+        'Generate narration and timing with the approved voice profile','Check Visualizer suggested timestamps first',
+        'Search suggested videos next, then the wider library only for unresolved footage',
+        'Keep visually suitable selections and resolve narration timing separately','Flag unresolved footage and timing for review',
+        'Render an MP4 review draft and a portable editable timeline package'],1):st.write(f'{n}. {label}')
     st.caption('The pilot uses the original Visualizer engine with trained-model deserialization disabled. It does not imply that unavailable videos or sampled-frame decisions have received human approval.')
 

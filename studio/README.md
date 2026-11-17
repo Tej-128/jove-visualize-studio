@@ -1,128 +1,43 @@
-# JoVE Visualize Studio — invited-user pilot
+# JoVE Visualize Studio
 
-One hosted interface for a numbered script, fresh JoVE Visualizer matching, ElevenLabs narration with timing, staged visual selection, audio pacing, and a Premiere-free draft edit.
+An invited-user pilot that accepts a plain numbered script and produces an MP4 review edit and a portable Shotcut timeline. Timestamps, video IDs, spreadsheets and a separately generated voiceover are not required inputs.
 
-## Current status
+## Current workflow
 
-The local source passes 21 checks, including search-order rules, spreadsheet parsing, invitation and owner access, archive traversal, verified asset-part reconstruction, title-cache restoration, bounded network retries, matching progress, cache invalidation, output-folder validation, actual video rendering, frame counts, and a seven-to-ten-second audio test that preserves a 1 kHz tone's pitch. A headless Streamlit check confirms that missing secure settings keep the application closed before project upload.
+1. Run the copied JoVE Visualizer matcher against the prepared private caption index.
+2. Generate narration with the approved ElevenLabs profile. Independent steps run with bounded concurrency; existing narration is reused after script and profile checks.
+3. Inspect suggested timestamp windows first, then suggested videos for unresolved steps, then the wider available library. Prepared timestamped storyboards support videos without captions.
+4. Select multiple complementary shots when one script step contains several actions. A narration-duration mismatch does not discard suitable footage.
+5. Recheck selected windows with denser samples. Unobservable metadata is recorded separately from absent actions and explicit scientific contradictions.
+6. Render real source footage on the complete narration clock. Review labels identify uncertain visuals and substantial footage-speed changes. Explicitly rejected windows cannot become verified fallback matches.
+7. Deliver MP4, editable timeline with portable media, source in/out records, audio adjustments and a review report. No placeholder-card renderer is used by the default editor.
 
-An invited owner has signed in on the hosted app. Private library reads and Shared Drive output writes have passed checks, and the first cloud trial has produced fresh matches and all nine narration files and reached visual review. **A completed scientific MP4, uninvited-account rejection, and full cloud resource suitability remain unverified.** This is pilot source, not a production-ready release.
+## Validation and limits
 
-## Workflow
+Local automated checks cover candidate-first routing from a plain script, multi-shot selection, uncertainty handling, rejection of invented sources and timestamps, provider-failure fallback, concurrent request accounting, real video rendering, narration frame coverage, pitch preservation, portable assets, invitation and owner checks, and archive/cache validation.
 
-```mermaid
-flowchart TD
- A[Script upload or Google Doc] --> B[Fresh Visualizer matching]
- B --> C[Generate step narration and timing]
- C --> D[Check every suggested timestamp option]
- D --> E{Complete visible action and suitable pacing?}
- E -->|No| F[Search full suggested videos]
- F --> G{Suitable footage found?}
- G -->|No| H[Search wider caption library and inspect available media]
- G -->|Yes| I[Select precise source range]
- E -->|Yes| I
- H --> J{Suitable footage found?}
- J -->|Yes| I
- J -->|No| K[Stop for review: missing or unsuitable footage]
- I --> L[Check audio tempo and neighboring-step pacing]
- L --> M{Within automatic limits?}
- M -->|No| K
- M -->|Yes| N[Render MP4, separate narration and portable editable timeline]
- N --> O[Playback and scientific review]
-```
+Local tests do not establish scientific accuracy or a ten-minute cloud runtime. Those require a real plain-script trial, comparison against withheld reference selections, playback review, and timing measurements. A related but unverified candidate is explicitly a review candidate. If no usable footage exists, the app must report the omitted step rather than manufacture a match. A partial edit is not a complete scientific production.
 
-The original caption matcher is retained under `vendor/`. Learned Python-object deserialization and reviewer-memory ranking are disabled in this pilot. Caption results are not treated as visual evidence. Reviewer annotations can be supplied through an optional matching-script workbook.
+The default visual stage has a 240-second budget, up to three concurrent checks, and bounded provider requests. It retains completed work and moves to rendering when review resources are exhausted. Matching and speech calls also have bounded timeouts. The target is five to ten minutes for a short script against an already prepared library; first-time uploads, indexing and provider outages are separate limitations.
 
-## Deploy with invited-user access without changing the existing audio application
+## Cloud data and access
 
-Use the new public-source `Tej-128/jove-visualize-studio` repository on branch `main` and a separate Streamlit app. The deployment URL can be public; project uploads and results require Google sign-in and an explicitly invited, verified email. Do not replace the existing audio app or change its privacy. This route requires live access-denial checks before company scripts or media are processed.
+Deploy this new repository with entry point `studio/app.py` and Python 3.11. Existing repositories and applications are independent.
 
-1. Create a Streamlit app from the new public-source repository, branch `main`. The entry point is `studio/app.py`; choose Python 3.11.
-2. The public app must stop at its sign-in gate for anonymous visitors. Add only intended accounts to the application's verified invitation list. Verify that signed-out and uninvited visitors cannot upload scripts, start jobs, or access project status or outputs.
-3. Configure secure settings using `studio/.streamlit/secrets.example.toml` as a template. Do not put real keys in GitHub or chat.
-4. Register the new app's exact `/oauth2callback` URL in its Google OIDC client. The existing audio application's redirect remains intact.
-5. Set `allowed_emails` to the invited accounts. A company-domain address alone is insufficient. The app also requires the verified-email claim.
-6. Share the private input library folder with the service account as Viewer. Choose a separate approved output folder inside a company Shared Drive and give the service account permission to create files there. Service accounts cannot own files in personal My Drive. Review inherited Shared Drive access before putting outputs there. Do not enable domain-wide delegation or grant organization-administrator rights.
-7. Configure the approved ElevenLabs voice profile and existing API keys. The pilot uses 44.1 kHz PCM; confirm the current ElevenLabs account permits that format before spending generation credits.
-8. Complete the checks below before inviting further users.
+Store actual credentials only in Streamlit secure settings, using `.streamlit/secrets.example.toml` as the field reference. Company scripts, captions, videos, voiceovers, generated edits and reports belong in approved private Drive folders, never the public repository. Google sign-in requires a verified email on the explicit invitation list. The app's Google callback is its own `/oauth2callback` URL.
 
-## Private media library
+The service account needs read access to the input Library and write access to a separate output folder in a company Shared Drive. No domain-wide delegation or organization-administrator access is needed. No billing setup or purchases are part of this deployment.
 
-The private library can also contain `article-title-cache.zip` with a companion `article-title-cache.json`. The descriptor binds its SHA-256 hash to the exact caption-index hash. The ZIP contains only the four permitted `v2_cache` files. This avoids rebuilding thousands of article-title embeddings during the first hosted match. The pilot limits CPU embedding threads to two, reports matching and visual-review step progress, and disables SDK retries inside the already bounded application retry loop. These changes do not lower scientific acceptance thresholds.
+The input Library contains the SHA-256-bound caption index, source media (or verified transfer parts), and optional prepared title/visual overview caches. `prepare_library.py` and `prepare_chunks.py` prepare these assets separately from script processing. The server never needs a user's Windows folder.
 
-An administrator prepares the caption index once using `prepare_library.py`. The runtime never reads a user's Windows folders.
+Generated narration, matching reports and completed selections are checkpointed in the private job folder. New owner/script checkpoints are authenticated before cloud restoration. Interrupted signed jobs can be restored after a host restart and rebuilt without reuploading the script. Older unsigned checkpoints are not automatically trusted for restoration.
 
-The private Drive input folder contains:
+## Editing policy
 
-```text
-Library/
-  index.zip
-  sha256sums.json
-  Videos/
-    original source MP4 files
-```
+Narration stays at the approved natural profile. Selected footage is allocated across each step's narration duration; material video-speed adjustments are visibly flagged for review, never disguised as scientific verification. Source cuts and playback changes remain in `edit_plan.json`. Multiple shots may illustrate one step. The default editor uses cuts within an experiment and does not add a dissolve between every numbered step. Automatic experiment-boundary classification and eight-frame dissolves at verified experiment boundaries remain future work.
 
-The package script accepts `--index`, `--videos`, and `--output`. The index archive contains only `manifest.json`, `corpus.sqlite`, and `embeddings.npy`. It excludes keys, caches, trained Python objects, and generated customer reports. The existing index already contains the VTT passages used for searching; separately uploading all VTT files is not required for this pilot.
+The editable package includes the prepared selected media and narration with relative paths. Source ranges and review limitations are retained, while the normalization and playback changes are baked into the packaged clip files. Original server media is not modified.
 
-Upload the generated two library files and the original Videos folder through your approved Drive workflow. Put that private folder ID in `LIBRARY_FOLDER_ID`. Use a different folder for `OUTPUT_FOLDER_ID`.
+## Production work still required
 
-For connectors that cannot transfer large files, `prepare_chunks.py` creates 64 MiB parts and `asset-parts.json`. Upload index parts to Library and video parts to Videos, then upload the manifest after every part succeeds. The app streams the parts back together and verifies the reassembled original checksum. This is a transfer accommodation, not a media conversion. Never keep both a full original video and its split representation active in the same manifest.
-
-The available example library has 30 videos. Results from the larger caption index whose video is absent are explicitly recorded as `media_unavailable`.
-
-## Narration and timing policy
-
-The approved voice/profile speed is supplied correctly in ElevenLabs `voice_settings`. Each step includes neighboring text as context and receives character timing. The original generated narration is retained. Pitch-preserving `atempo` processing fits the audio to the chosen action range.
-
-Automatic post-generation tempo is initially limited to 0.85–1.15. Larger adjustments and adjacent tempo jumps above a 1.2 ratio stop for review. For example, seven seconds into ten requires tempo 0.70 and is deliberately flagged. These are configurable pilot policies, not scientific quality thresholds.
-
-Scientific suitability remains the first criterion. Complete-action ranges are compared for pacing suitability. The app does not invent a missing step, loop footage, silently accept a partial match, or rewrite narration.
-
-Every numbered step currently creates a section boundary. If several script steps belong to a single experiment, explicit section grouping must be added before production use. Dissolves are eight frames, centered on section boundaries, with source handles reserved.
-
-The editable package includes normalized selected shots and adjusted narration with relative paths. It does not require the recipient to have the original server library. It supports further timeline editing, but the prepared shot durations and original video normalization are baked into those media files. Source choices and original in/out times remain in `edit_plan.json`.
-
-## Review and retry limitations
-
-Uncertain or missing footage and unsuitable pacing stop the job with a downloadable report. The current pilot does not yet have a per-step approval/override editor; correct the inputs or selection policy before rerunning. Failed jobs do not automatically bypass review.
-
-Stage records, fresh candidate workbooks and generated narration are saved to a unique private Drive job folder. Runtime status is owner-scoped. The current UI follows jobs in the running container; recovery after a host restart from the saved Drive checkpoints still needs implementation. Provider retries and generation can consume credits; duplicate-request recovery and a currency-based spending guard need validation before production.
-
-## Security checks completed
-
-- Missing configuration closes the app before uploads.
-- Only authenticated, verified, explicitly invited emails can submit projects.
-- Project status and downloads check the authenticated owner.
-- Keys remain in server memory and hosted secure settings.
-- Private Drive access uses a scoped service identity with folder-level access.
-- Library binaries are checked against administrator-provided SHA-256 hashes.
-- Archive path traversal, links, and oversized index expansion are rejected.
-- No remotely supplied pickle/joblib model is loaded.
-- All media commands use argument arrays; script text is not executable shell code.
-- Gemini's preprocessing call is disabled.
-
-These checks do not certify the hosting platform, provider data-retention policy, OAuth deployment, or all application dependencies as vulnerability-free. Live sign-in and access-denial tests are required on the deployed pilot.
-
-## Cloud acceptance checks
-
-1. An uninvited account cannot submit, view a report, or download a project.
-2. An invited user cannot access another user's job.
-3. The correct Drosophila script yields fresh candidate rows; the organoid workbook is not attached to it.
-4. The approved voice and generation speed are audible and returned timing is complete.
-5. The attempt log shows all suggested ranges before any broader search.
-6. Missing videos and uncertain scientific matches remain flagged.
-7. Rendered video frame count, narration coverage, pitch and step boundaries pass checks.
-8. The editable archive opens after extraction into a different folder.
-9. A host restart demonstrates checkpoint recovery, or the pilot limitation is clearly shown.
-10. Existing API credits are used within the agreed limits, without activating new purchases.
-
-## Before-4-PM demo gate
-
-The source and offline checks are prepared. A real shared demo still requires private deployment, secure settings, library upload, and a fresh provider run. Do not label a cached assembly, setup screen, or failed/needs-review job a complete fresh end-to-end demo. The first live run may correctly stop on missing or unsuitable footage.
-
-## Production work remaining
-
-Durable queued workers independent of Streamlit, cloud restart recovery, per-step review and correction controls, calibrated visual acceptance, motion/boundary playback checks, section grouping, complete media coverage, concurrent multi-user load tests, retention/deletion controls, dependency review and pinned builds, and account-level billing safeguards.
-
-For production, retain the same pipeline contracts but put job execution in an approved container-job service rather than relying on a free Streamlit process to survive long renders.
-
+Validate fresh scripts and withheld references; measure warm and cold cloud runtimes; calibrate visual decisions; test invited/uninvited users and multi-user load; validate host restart recovery; add per-shot review controls, retention/deletion policy, a durable independent worker service, experiment grouping, and account-level spending safeguards. Free Streamlit hosting is a pilot environment, not a guaranteed production service.

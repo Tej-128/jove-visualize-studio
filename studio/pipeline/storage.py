@@ -25,7 +25,7 @@ class DriveStore:
         if not re.fullmatch(r'[A-Za-z0-9_-]+',folder_id):raise ValueError('Invalid Drive folder identifier')
         items=[];token=None
         while True:
-            params={'q':f"'{folder_id}' in parents and trashed=false",'fields':'nextPageToken,files(id,name,mimeType,size)',
+            params={'q':f"'{folder_id}' in parents and trashed=false",'fields':'nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime)',
                     'pageSize':1000,'supportsAllDrives':'true','includeItemsFromAllDrives':'true'}
             if token:params['pageToken']=token
             response=self.request('GET',f'{BASE}/files',params=params).json();items.extend(response.get('files',[]))
@@ -54,15 +54,28 @@ class DriveStore:
 
     def upload(self,path,folder_id):
         path=Path(path)
-        r=self.request('POST','https://www.googleapis.com/upload/drive/v3/files',
+        if not hasattr(self,'upload_ids'):self.upload_ids={}
+        key=(folder_id,path.name)
+        if key not in self.upload_ids:
+            escaped=path.name.replace('\\','\\\\').replace("'","\\'")
+            existing=self.request('GET',f'{BASE}/files',params={
+                'q':f"'{folder_id}' in parents and name='{escaped}' and trashed=false",
+                'fields':'files(id)','orderBy':'createdTime desc','pageSize':1,
+                'supportsAllDrives':'true','includeItemsFromAllDrives':'true'}).json().get('files',[])
+            self.upload_ids[key]=existing[0]['id'] if existing else None
+        ident=self.upload_ids[key]
+        url='https://www.googleapis.com/upload/drive/v3/files'+('/'+ident if ident else '')
+        r=self.request('PATCH' if ident else 'POST',url,
             params={'uploadType':'resumable','supportsAllDrives':'true'},
-            json={'name':path.name,'parents':[folder_id]},headers={'X-Upload-Content-Length':str(path.stat().st_size)})
+            json={'name':path.name,**({} if ident else {'parents':[folder_id]})},headers={'X-Upload-Content-Length':str(path.stat().st_size)})
         # Drive issues an HTTPS Google upload URL. Never send credentials to other hosts.
         location=r.headers['Location']
         from urllib.parse import urlsplit
         if urlsplit(location).scheme!='https' or urlsplit(location).hostname not in {'www.googleapis.com','content.googleapis.com'}:
             raise ValueError('Unexpected upload destination')
-        with path.open('rb') as f:self.request('PUT',location,data=f,headers={'Content-Length':str(path.stat().st_size)})
+        with path.open('rb') as f:
+            result=self.request('PUT',location,data=f,headers={'Content-Length':str(path.stat().st_size)})
+        if not ident:self.upload_ids[key]=result.json()['id']
 
     def folder(self,parent_id,name):
         parent=self.info(parent_id)

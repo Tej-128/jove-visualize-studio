@@ -35,7 +35,7 @@ class RecoveryTests(unittest.TestCase):
             step=SimpleNamespace(number=1,text='Tap tube.',previous_text='',next_text='')
             index=Mock();store=Mock();gateway=SimpleNamespace(calls=[],prior_calls=[])
             cfg={'google_service_account':{},'OUTPUT_FOLDER_ID':'output','LIBRARY_FOLDER_ID':'library',
-                 'OPENAI_API_KEY':'test','ELEVENLABS_API_KEY':'test','voice':{'id':'voice','speed':.88}}
+                 'OPENAI_API_KEY':'test','ELEVENLABS_API_KEY':'test','voice':{'id':'voice','speed':.88},'AUTOMATIC_EDITOR':False}
             with patch('pipeline.runner.DriveStore',return_value=store),patch('pipeline.runner.Library') as library,\
                  patch('pipeline.runner.CorpusIndex',return_value=index),patch('pipeline.runner.parse_steps_from_text',return_value=[step]),\
                  patch('pipeline.runner.match_steps') as match,patch('pipeline.runner.generate_step_audio') as tts,\
@@ -50,6 +50,35 @@ class RecoveryTests(unittest.TestCase):
             self.assertIn('request limit',state['detail'])
             self.assertTrue((folder/'report.json').exists())
             index.connection.close.assert_called_once()
+
+    def test_plain_script_defaults_to_candidate_first_search_without_full_subset_scan(self):
+        with TemporaryDirectory() as t:
+            folder=Path(t)/('a'*32);folder.mkdir()
+            write_json(folder/'state.json',{'id':'a'*32,'owner':'a@example.test','output_folder_id':'existing-output'})
+            write_json(folder/'matches.json',[{'step_number':1,'script_step':'Tap tube.','best_match':None}])
+            (folder/'narration-001.wav').write_bytes(b'saved audio')
+            write_json(folder/'narration-001.json',{'spoken':'Tap tube.','voice_id':'voice','generation_speed':.88,'duration':2})
+            step=SimpleNamespace(number=1,text='Tap tube.',previous_text='',next_text='')
+            index=Mock()
+            cfg={'google_service_account':{},'OUTPUT_FOLDER_ID':'output','LIBRARY_FOLDER_ID':'library',
+                 'OPENAI_API_KEY':'test','ELEVENLABS_API_KEY':'test','voice':{'id':'voice','speed':.88},'AUTOMATIC_EDITOR':False}
+            with patch('pipeline.runner.DriveStore'),patch('pipeline.runner.Library') as library,\
+                 patch('pipeline.runner.CorpusIndex',return_value=index),patch('pipeline.runner.parse_steps_from_text',return_value=[step]),\
+                 patch('pipeline.runner.match_steps') as match,patch('pipeline.runner.generate_step_audio') as tts,\
+                 patch('pipeline.runner.run_full_subset') as full_search,\
+                 patch('pipeline.runner.ModelGateway',return_value=SimpleNamespace(calls=[],prior_calls=[])),\
+                 patch('pipeline.runner.Selector') as selector:
+                library.from_folder.return_value=SimpleNamespace(index=lambda:'.',videos={'1':{}})
+                selector.return_value.select.return_value=None
+                selector.return_value.attempts=[]
+                run(folder,'a@example.test','Tap tube.',cfg)
+                full_search.assert_not_called()
+                selector.return_value.select.assert_called_once_with(step,[],2)
+                match.assert_not_called();tts.assert_not_called()
+            index.connection.close.assert_called_once()
+            final=json.loads((folder/'state.json').read_text())
+            self.assertEqual(final['status'],'needs_review')
+            self.assertEqual(final['completed_visual_steps'],1)
 
     def test_other_user_cannot_resume_a_saved_project(self):
         with TemporaryDirectory() as t:

@@ -58,14 +58,16 @@ class Selector:
         for c in suggested:
             result=self.inspect(step,c,'suggested_timestamp',audio_seconds)
             if result:candidates.append(result)
-        if any(not c['needs_timing_review'] for c in candidates):return self.best(candidates)
+        # Keep visually valid footage even when its duration needs a separate edit.
+        # A narration mismatch is not evidence that this search tier failed.
+        if candidates:return self.best(candidates)
         ids=list(dict.fromkeys(str(c['video_id']) for c in suggested))
         for vid in ids:
             if vid not in self.library.videos:continue
             for c in self.full_video_windows(step,vid):
                 result=self.inspect(step,c,'full_suggested_video',audio_seconds)
                 if result:candidates.append(result)
-        if any(not c['needs_timing_review'] for c in candidates):return self.best(candidates)
+        if candidates:return self.best(candidates)
         # Retrieve from the complete caption index; unavailable source media remain explicit.
         fresh=self.wider_candidates(step,ids)
         available=[c for c in fresh if c.article_id not in ids]

@@ -24,6 +24,26 @@ def sample_frames(path,start,end,folder,count=16):
         items.append({'time':round(t,4),'data':'data:image/jpeg;base64,'+base64.b64encode(raw).decode()})
     return items
 
+
+def sample_window(path,start,end,folder,count=12):
+    """Decode one candidate window once; report the actual selected frame times."""
+    import math
+    import re
+    if not all(math.isfinite(float(x)) for x in (start,end)) or not 0<=start<end:
+        raise ValueError('Invalid sampling interval')
+    folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
+    count=max(2,min(80,int(count)));spacing=(end-start)/max(1,count-1)
+    for old in folder.glob('sample-*.jpg'):old.unlink()
+    execute(['-threads','1','-ss',f'{start:.9f}','-t',f'{end-start:.9f}','-i',path,
+        '-an','-filter_threads','1','-vf',
+        f"trim=duration={end-start:.9f},select='isnan(prev_selected_t)+gte(t-prev_selected_t,{spacing:.9f})',showinfo,scale=640:-2",
+        '-fps_mode','vfr','-frames:v',str(count),'-q:v','3',folder/'sample-%04d.jpg'],folder/'samples.log')
+    times=[float(t) for t in re.findall(r'\bn:\s*\d+[^\n]*?\bpts_time:([0-9.eE+-]+)',(folder/'samples.log').read_text(errors='replace'))]
+    files=sorted(folder.glob('sample-*.jpg'))
+    if len(files)!=len(times) or not files:raise ValueError('Candidate frame extraction was incomplete')
+    return [{'time':round(start+t,6),'data':'data:image/jpeg;base64,'+base64.b64encode(p.read_bytes()).decode(),
+             'detail':'high'} for p,t in zip(files,times) if start<=start+t<=end]
+
 def duration(path):
     # FFmpeg prints its probed duration even when no output is selected.
     import re
