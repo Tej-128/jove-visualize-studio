@@ -10,6 +10,9 @@ import sys
 import threading
 import time
 import uuid
+import io
+import zipfile
+import traceback
 
 VENDOR=Path(__file__).resolve().parents[1]/'vendor'
 sys.path.insert(0,str(VENDOR/'src'))
@@ -58,6 +61,30 @@ class Jobs:
         if name not in {'preview.mp4','editable-package.zip','report.json','matches.xlsx','matches.json','state.json','audio-adjustments.json'}:
             raise PermissionError('Unsupported download')
         return self.root/ident/name
+
+    def recent(self,owner):
+        projects=[]
+        for path in self.root.glob('*/state.json'):
+            if not re.fullmatch('[a-f0-9]{32}',path.parent.name):continue
+            try:
+                state=json.loads(path.read_text())
+                if state.get('owner')==owner:projects.append(state)
+            except (OSError,ValueError):continue
+        return sorted(projects,key=lambda s:s.get('created',0),reverse=True)
+
+    def diagnostics(self,ident,owner):
+        self.state(ident,owner)
+        folder=self.root/ident
+        output=io.BytesIO()
+        with zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as archive:
+            for name in ['state.json','report.json','failure.json']:
+                path=folder/name
+                if path.is_file():archive.write(path,name)
+            # Only local media-processing logs, never settings or credentials.
+            logs=sorted(folder.rglob('*.log'),key=lambda p:p.stat().st_mtime,reverse=True)[:20]
+            for path in logs:
+                archive.writestr(str(path.relative_to(folder)),path.read_bytes()[-65536:])
+        return output.getvalue()
 
 def run(folder,owner,text,config):
     state=json.loads((folder/'state.json').read_text());store=None;remote=None;index=None
@@ -148,8 +175,18 @@ def run(folder,owner,text,config):
         # Avoid exposing provider messages, request bodies, or credential-bearing URLs.
         message=str(e) if isinstance(e,(ValueError,PermissionError)) else f'{type(e).__name__}: processing stopped; inspect the private server log.'
         state.update(status='failed',error=message,updated=time.time());write_json(folder/'state.json',state)
+        # Record locations without provider response bodies or credential-bearing URLs.
+        trace=[{'file':Path(f.filename).name,'line':f.lineno,'function':f.name}
+               for f in traceback.extract_tb(e.__traceback__)]
+        failure={'exception':type(e).__name__,'stage':state.get('stage'),'trace':trace}
+        if 'gateway' in locals():failure['vision_requests']=len(gateway.calls)
+        write_json(folder/'failure.json',failure)
+        print(f"[job {state['id'][:8]}] failed: {json.dumps(failure)}",flush=True)
         if store and remote:
-            try:store.upload(folder/'state.json',remote)
+            try:
+                store.upload(folder/'state.json',remote)
+                store.upload(folder/'failure.json',remote)
+                if (folder/'report.json').exists():store.upload(folder/'report.json',remote)
             except Exception:pass
     finally:
         if index:index.connection.close()

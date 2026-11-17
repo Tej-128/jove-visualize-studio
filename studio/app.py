@@ -95,6 +95,9 @@ with tabs[0]:
 with tabs[1]:
     st.subheader('Your current project')
     ident=st.session_state.get('job_id')
+    recent=manager().recent(email)
+    if not ident and recent:
+        ident=recent[0]['id'];st.session_state['job_id']=ident
     if not ident:st.write('Start a project from Create video.')
     else:
         @st.fragment(run_every='8s')
@@ -111,6 +114,9 @@ with tabs[1]:
             if state['stage']=='visual_verification' and state.get('total_visual_steps'):
                 st.progress(min(1.,state.get('completed_visual_steps',0)/state['total_visual_steps']),text=f"{state.get('completed_visual_steps',0)} of {state['total_visual_steps']} steps reviewed")
             if state.get('error'):st.error(state['error'])
+            if state['status'] in {'failed','needs_review'}:
+                st.download_button('Download private diagnostics',manager().diagnostics(ident,email),
+                    file_name='project-diagnostics.zip',key='download-diagnostics',mime='application/zip')
             if state.get('issues'):
                 st.warning('Review is required before a complete edit can be rendered.')
                 st.dataframe(state['issues'],hide_index=True,use_container_width=True)

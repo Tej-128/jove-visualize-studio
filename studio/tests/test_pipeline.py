@@ -122,6 +122,20 @@ class SearchOrderTests(unittest.TestCase):
         s=self.selector();self.assertIsNone(s.select(SimpleNamespace(number=1),[{'video_id':'1'}],3))
 
 class AccessTests(unittest.TestCase):
+    def test_recovery_and_diagnostics_remain_owner_scoped(self):
+        from pipeline.runner import Jobs,write_json
+        with TemporaryDirectory() as t:
+            jobs=Jobs(t);ident='a'*32;folder=Path(t)/ident;folder.mkdir()
+            write_json(folder/'state.json',{'owner':'a@example.test','id':ident,'created':1})
+            (folder/'secrets.toml').write_text('must never be exported')
+            (folder/'media.log').write_text('media diagnostic')
+            self.assertEqual(jobs.recent('b@example.test'),[])
+            self.assertEqual(jobs.recent('a@example.test')[0]['id'],ident)
+            with self.assertRaises(PermissionError):jobs.diagnostics(ident,'b@example.test')
+            with zipfile.ZipFile(BytesIO(jobs.diagnostics(ident,'a@example.test'))) as z:
+                self.assertEqual(set(z.namelist()),{'state.json','media.log'})
+            jobs.executor.shutdown()
+
     def test_verified_email_and_explicit_invitation_are_both_required(self):
         from pipeline.access import invited
         self.assertTrue(invited(' A@EXAMPLE.TEST ',True,['a@example.test']))
