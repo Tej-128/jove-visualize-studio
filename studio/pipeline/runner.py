@@ -115,7 +115,8 @@ class Jobs:
             if any(not f.done() for f in self.futures.values()):raise ValueError('Wait for the current project to finish.')
             folder=self.root/ident
             text=(folder/'input.txt').read_text(encoding='utf-8')
-            state.update(status='queued',stage='recovery',error=None,issues=[],updated=time.time())
+            state.update(status='queued',stage='recovery',error=None,issues=[],verification=None,
+                         detail='Rebuilding from the saved script, matches and narration.',updated=time.time())
             write_json(folder/'state.json',state)
             self.futures[ident]=self.executor.submit(run,folder,owner,text,config)
         return ident
@@ -344,7 +345,7 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
     from .action_render import render_actions
     started=time.monotonic()
     checkpoint('visual_verification',detail='Checking suggested timestamps first. Suitable footage is retained while timing is solved separately.',
-               editor_version=VERSION,verification=None,total_visual_steps=len(steps),completed_visual_steps=0)
+               editor_version=VERSION,engine_build=config.get('ENGINE_BUILD'),verification=None,total_visual_steps=len(steps),completed_visual_steps=0)
     gateway=ModelGateway(config['OPENAI_API_KEY'],config.get('VISION_MODEL','gpt-4.1-mini'),int(config.get('MAX_VISION_CALLS',80)),
                          cache_dir=folder/'automatic-cache')
     audio_map={step.number:audio for step,audio in zip(steps,audios)}

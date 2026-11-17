@@ -39,19 +39,24 @@ if not invited(email,st.user.get('email_verified'),allowed):
     if st.button('Sign out'):st.logout()
     st.stop()
 
-from pipeline.runner import Jobs
-from pipeline.storage import DriveStore
+from runtime_loader import load_runtime
+runtime=load_runtime()
+Jobs=runtime.Jobs
+DriveStore=runtime.DriveStore
 
 @st.cache_resource
-def manager(recovery_version='automatic-editor-v1'):
+def manager_for_build(recovery_version):
     root=Path(tempfile.gettempdir())/'jove-studio-jobs'
     return Jobs(root)
+
+def manager():
+    return manager_for_build(runtime.revision)
 
 def settings():
     keys=['OPENAI_API_KEY','ELEVENLABS_API_KEY','google_service_account','LIBRARY_FOLDER_ID','OUTPUT_FOLDER_ID']
     cfg={k:dict(st.secrets[k]) if k=='google_service_account' else st.secrets[k] for k in keys}
     cfg.update(TEXT_MODEL=st.secrets.get('TEXT_MODEL','gpt-5-mini'),VISION_MODEL=st.secrets.get('VISION_MODEL','gpt-4.1-mini'),
-               MAX_VISION_CALLS=int(st.secrets.get('MAX_VISION_CALLS',80)))
+               MAX_VISION_CALLS=int(st.secrets.get('MAX_VISION_CALLS',80)),ENGINE_BUILD=runtime.revision)
     return cfg
 
 with st.sidebar:
