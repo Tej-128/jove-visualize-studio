@@ -43,7 +43,7 @@ from pipeline.runner import Jobs
 from pipeline.storage import DriveStore
 
 @st.cache_resource
-def manager():
+def manager(recovery_version='duration-aware-v1'):
     root=Path(tempfile.gettempdir())/'jove-studio-jobs'
     return Jobs(root)
 
