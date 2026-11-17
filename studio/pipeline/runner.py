@@ -368,8 +368,10 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
     checkpoint('assembly',detail=f'Rendering {len(plans)} script steps using real source footage. Narration is retained; review flags stay visible.',issues=issues)
     result=render_actions(plans,audio_map,library,folder)
     for row in json.loads((folder/'audio-adjustments.json').read_text()):
-        if not .85<=row['video_speed']<=1.15:
+        if not .85<=row['video_speed']<=1.151:
             issues.append({'step':row['step'],'reason':f"Footage plays at {row['video_speed']:.2f}x to retain the complete selected action and natural narration. Review pacing."})
+        if row.get('additional_viewing_seconds',0)>.3:
+            issues.append({'step':row['step'],'reason':f"The selected action requires {row['additional_viewing_seconds']:.1f} extra seconds of viewing after narration; review pacing or select a more concise action."})
     result['review_only']=bool(issues);result['omitted_steps']=missing
     report.update(issues=issues,verification=result,processing_seconds=round(time.monotonic()-config.get('_PIPELINE_STARTED',started),2),draft_contains_placeholders=False)
     write_json(folder/'report.json',report)

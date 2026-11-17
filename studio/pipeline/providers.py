@@ -34,8 +34,10 @@ class ModelGateway:
         if len(self.calls)>=self.max_calls:
             raise VisionBudgetExceeded('The visual review request limit was reached. Saved work is retained; review or continue the saved project.')
 
-    def ask(self,instructions,payload,images=()):
-        fingerprint=hashlib.sha256(json.dumps([self.model,instructions,payload,list(images)],sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+    def ask(self,instructions,payload,images=(),schema=None):
+        cache_key=[self.model,instructions,payload,list(images)]
+        if schema is not None:cache_key.append({'schema':schema})
+        fingerprint=hashlib.sha256(json.dumps(cache_key,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
         cached=self.cache_dir/(fingerprint+'.json') if self.cache_dir else None
         if cached and cached.exists():
             self.cache_hits+=1
@@ -54,8 +56,9 @@ class ModelGateway:
             client=self.client
             if self.deadline is not None:
                 client=client.with_options(timeout=max(1,min(45,self.deadline-time.monotonic())))
+            response_format={'type':'json_schema','json_schema':{'name':'visual_edit_plan','strict':True,'schema':schema}} if schema else {'type':'json_object'}
             r=client.chat.completions.create(model=self.model,messages=[{'role':'system','content':instructions},
-                {'role':'user','content':contents}],response_format={'type':'json_object'})
+                {'role':'user','content':contents}],response_format=response_format)
             answer=json.loads(r.choices[0].message.content)
             if not isinstance(answer,dict):raise ValueError('Visual review returned an invalid response shape')
             record.update(status='complete',id=r.id,tokens=r.usage.total_tokens if r.usage else None)

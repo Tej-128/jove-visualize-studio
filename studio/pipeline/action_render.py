@@ -12,11 +12,17 @@ from .media import execute,retime_audio
 from .timing import allocate_frames
 
 def cut_schedule(plans,audios,fps='30000/1001'):
-    rate=float(Fraction(fps));durations=[audios[p['step']]['duration'] for p in plans]
+    rate=float(Fraction(fps))
+    # Never compress a long selected procedure into extreme fast-forward.
+    # Natural speech is preserved; any additional viewing time is reported.
+    durations=[max(audios[p['step']]['duration'],sum(s['end']-s['start'] for s in p['shots'])/1.15) for p in plans]
     boundaries=allocate_frames(durations,fps);result=[];adjustments=[]
     for plan,(begin,end) in zip(plans,boundaries):
         total=sum(s['end']-s['start'] for s in plan['shots'])
         if not math.isfinite(total) or total<=0:raise ValueError('Invalid selected footage duration')
+        step_seconds=(end-begin)/rate
+        audio_tempo=max(.95,min(1.05,audios[plan['step']]['duration']/step_seconds))
+        silence=max(0.,step_seconds-audios[plan['step']]['duration']/audio_tempo)
         used=0;elapsed=0.
         for index,s in enumerate(plan['shots']):
             elapsed+=s['end']-s['start']
@@ -24,13 +30,13 @@ def cut_schedule(plans,audios,fps='30000/1001'):
             frames=cut-used
             if frames<1:raise ValueError('Shot cannot fit the narration frame clock')
             speed=(s['end']-s['start'])/(frames/rate)
-            review=bool(plan['needs_review'] or not .85<=speed<=1.15)
+            review=bool(plan['needs_review'] or not .85<=speed<=1.151 or silence>.3)
             result.append({**s,'step':plan['step'],'text':plan['text'],'frames':frames,
                 'timeline_start_frame':begin+used,'timeline_end_frame':begin+cut,'video_speed':speed,
-                'review':review,'missing_actions':plan['missing_actions'],'unobservable_details':plan['unobservable_details']})
+                'review':review,'additional_viewing_seconds':silence,'missing_actions':plan['missing_actions'],'unobservable_details':plan['unobservable_details']})
             used=cut
         adjustments.append({'step':plan['step'],'original_audio_seconds':audios[plan['step']]['duration'],
-            'timeline_seconds':(end-begin)/rate,'tempo':audios[plan['step']]['duration']/((end-begin)/rate),
+            'timeline_seconds':(end-begin)/rate,'tempo':audio_tempo,'additional_viewing_seconds':silence,
             'source_video_seconds':total,'video_speed':total/((end-begin)/rate),
             'review':any(s['review'] for s in result if s['step']==plan['step'])})
     return result,adjustments,boundaries[-1][1]

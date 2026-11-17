@@ -10,7 +10,7 @@ import wave
 import zipfile
 import xml.etree.ElementTree as ET
 import imageio_ffmpeg
-from pipeline.automatic_edit import AutomaticEditor,validated_plan
+from pipeline.automatic_edit import AutomaticEditor,validated_plan,plan_schema
 from pipeline.action_render import cut_schedule,render_actions
 from pipeline.media import execute,sample_window
 from pipeline.providers import ModelGateway
@@ -24,6 +24,29 @@ def response(window='w0',**extra):
 def windows():return [dict(window_id='w0',video_id='101',start=.5,end=4.,tier='suggested_timestamp')]
 
 class AutomaticSelectionTests(unittest.TestCase):
+    def test_model_contract_prevents_the_observed_live_format_errors(self):
+        step=SimpleNamespace(number=1,text='Transfer flies and count them.')
+        schema=plan_schema(step,windows())
+        shot=schema['properties']['shots']['items']['properties']
+        self.assertEqual(shot['evidence']['enum'],['demonstrated','illustrative','uncertain'])
+        self.assertEqual(shot['covered_actions']['type'],'array')
+        self.assertEqual(shot['window_id']['enum'],['w0'])
+        self.assertIn('Transfer flies',shot['covered_actions']['items']['enum'])
+        self.assertNotIn('Unrelated source caption',shot['covered_actions']['items']['enum'])
+
+    def test_gateway_sends_strict_schema_and_does_not_reuse_an_unconstrained_response(self):
+        client=Mock();client.chat.completions.create.return_value=SimpleNamespace(id='test',usage=SimpleNamespace(total_tokens=1),
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"shots":[],"missing_actions":[],"unobservable_details":[]}'))])
+        with TemporaryDirectory() as t,patch('pipeline.providers.OpenAI',return_value=client):
+            gateway=ModelGateway('test','test',3,Path(t)/'cache')
+            gateway.ask('rules',{'step':'Transfer flies.'})
+            schema=plan_schema(SimpleNamespace(text='Transfer flies.'),windows())
+            gateway.ask('rules',{'step':'Transfer flies.'},schema=schema)
+            self.assertEqual(client.chat.completions.create.call_count,2)
+            sent=client.chat.completions.create.call_args.kwargs['response_format']
+            self.assertEqual(sent['type'],'json_schema');self.assertTrue(sent['json_schema']['strict'])
+            self.assertEqual(sent['json_schema']['schema'],schema)
+
     def test_unobservable_metadata_does_not_delete_useful_footage(self):
         step=SimpleNamespace(number=1,text='Transfer flies into the tube.')
         plan=validated_plan(response(unobservable_details=['Specimen sex cannot be established visually.']),windows(),step)
@@ -57,6 +80,8 @@ class AutomaticSelectionTests(unittest.TestCase):
             self.assertEqual(result[0]['shots'][0]['video_id'],'101')
             self.assertTrue(result[0]['dense_checked'])
             self.assertEqual(gateway.ask.call_count,2)
+            dense_window=gateway.ask.call_args_list[1].args[1]['windows'][0]
+            self.assertGreaterEqual(dense_window['end']-dense_window['start'],3.5)
             library.restore_overviews.assert_not_called()
             self.assertNotIn('reference',json.dumps(gateway.ask.call_args_list[0].args[1]).lower())
 
@@ -131,6 +156,14 @@ class AutomaticSelectionTests(unittest.TestCase):
             self.assertTrue(all('elapsed_seconds' in x for x in saved))
 
 class MultiShotMediaTests(unittest.TestCase):
+    def test_long_action_cannot_create_extreme_video_or_voice_playback_speed(self):
+        plans=[{'step':1,'text':'Transfer flies.','needs_review':False,'missing_actions':[],'unobservable_details':[],
+                'shots':[dict(video_id='101',start=1.,end=61.,reason='A long complete action')]}]
+        shots,adjustments,total=cut_schedule(plans,{1:{'duration':7}})
+        self.assertLessEqual(shots[0]['video_speed'],1.151)
+        self.assertGreaterEqual(adjustments[0]['tempo'],.95)
+        self.assertGreater(adjustments[0]['additional_viewing_seconds'],30)
+        self.assertTrue(shots[0]['review'])
     def test_multi_shot_schedule_keeps_speech_natural_and_reports_extreme_video_speed(self):
         plans=[{'step':1,'text':'Transfer flies.','needs_review':False,'missing_actions':[],'unobservable_details':[],
                 'shots':[dict(video_id='101',start=1.,end=3.,reason='First action'),dict(video_id='101',start=4.,end=6.,reason='Second action')]}]
