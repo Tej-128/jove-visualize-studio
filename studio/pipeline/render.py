@@ -91,3 +91,32 @@ def render(shots,folder,fps='30000/1001',width=1280,height=720):
         for p in [folder/'editable.mlt',folder/'edit_plan.json',folder/'narration.wav',*media.glob('shot-*.mp4')]:archive.write(p,p.relative_to(folder).as_posix())
     return {'frames':length,'fps':fps,'duration':length/float(rate),'dissolves':len(shots)-1,'dissolve_frames':8}
 
+
+def render_review_draft(verified,steps,audios,folder,width=1280,height=720):
+    """Deliver an editable review artifact with explicit cards for unsupported steps."""
+    from PIL import Image,ImageDraw,ImageFont
+    import textwrap
+    folder=Path(folder);cards=folder/'review-cards';cards.mkdir(exist_ok=True)
+    by_step={s['step']:s for s in verified};timeline=[];missing=[]
+    for step,audio in zip(steps,audios):
+        if step.number in by_step:
+            shot=dict(by_step[step.number]);shot['audio_path']=audio['path'];timeline.append(shot);continue
+        missing.append(step.number)
+        image=Image.new('RGB',(width,height),'#102536');draw=ImageDraw.Draw(image)
+        header=ImageFont.load_default(size=34);body=ImageFont.load_default(size=28)
+        draw.text((60,60),'REVIEW DRAFT — FOOTAGE NOT VERIFIED',font=header,fill='#ffc857')
+        draw.text((60,145),f'Step {step.number}',font=header,fill='white')
+        lines=textwrap.wrap(step.text,width=65)
+        draw.multiline_text((60,225),'\n'.join(lines),font=body,fill='white',spacing=14)
+        draw.text((60,height-90),'Placeholder for review. This card does not depict the procedure.',font=ImageFont.load_default(size=22),fill='#c5d2dc')
+        still=cards/f'step-{step.number:03}.png';image.save(still)
+        source=still.with_suffix('.mp4')
+        execute(['-loop','1','-i',still,'-t',str(audio['duration']+.5),'-an','-r','30000/1001',
+                 '-c:v','libx264','-threads','1','-pix_fmt','yuv420p',source],source.with_suffix('.log'))
+        timeline.append({'step':step.number,'text':step.text,'video_id':'review-placeholder','path':str(source),
+                         'start':.2,'end':.2+audio['duration'],'audio_path':audio['path'],'audio_duration':audio['duration'],
+                         'tempo':1.,'confidence':0.,'tier':'clearly_marked_review_placeholder','kind':'footage_not_verified',
+                         'reason':'No scientifically compatible complete action with natural narration timing has been verified.'})
+    result=render(timeline,folder,width=width,height=height)
+    return {**result,'review_only':True,'placeholder_steps':missing,'verified_steps':len(verified)}
+
