@@ -45,8 +45,7 @@ from pipeline.storage import DriveStore
 @st.cache_resource
 def manager():
     root=Path(tempfile.gettempdir())/'jove-studio-jobs'
-    jobs=Jobs(root)
-    return jobs
+    return Jobs(root)
 
 def settings():
     keys=['OPENAI_API_KEY','ELEVENLABS_API_KEY','google_service_account','LIBRARY_FOLDER_ID','OUTPUT_FOLDER_ID']
@@ -110,12 +109,15 @@ with tabs[1]:
                 st.warning('This runtime no longer has the project. Its saved checkpoints remain in the configured output folder.');return
             st.write('Status: **'+state['status'].replace('_',' ')+'**')
             st.write('Stage: '+state['stage'].replace('_',' '))
-            if state.get('detail'):st.write(state['detail'])
+            if state['stage']=='review':st.write('Visual review is complete. Resolve the flagged steps before rendering.')
+            elif state.get('detail'):st.write(state['detail'])
             st.caption('Last reported activity: '+str(round(time.time()-state.get('updated',state.get('created',0))))+' seconds ago')
             if state['stage']=='matching' and state.get('matching_total'):
                 st.progress(min(1.,state.get('matching_completed',0)/state['matching_total']),text=f"{state.get('matching_completed',0)} of {state['matching_total']} steps in this matching phase")
             if state['stage']=='visual_verification' and state.get('total_visual_steps'):
                 st.progress(min(1.,state.get('completed_visual_steps',0)/state['total_visual_steps']),text=f"{state.get('completed_visual_steps',0)} of {state['total_visual_steps']} steps reviewed")
+            if state['stage']=='timing' and state.get('timing_total'):
+                st.progress(min(1.,state.get('timing_completed',0)/state['timing_total']),text=f"{state.get('timing_completed',0)} of {state['timing_total']} timing mismatches checked")
             if state.get('error'):st.error(state['error'])
             if state['status'] in {'failed','needs_review'}:
                 st.download_button('Download private diagnostics',manager().diagnostics(ident,email),
@@ -132,6 +134,14 @@ with tabs[1]:
             if state.get('issues'):
                 st.warning('Review is required before a complete edit can be rendered.')
                 st.dataframe(state['issues'],hide_index=True,use_container_width=True)
+                if state['status']=='needs_review' and state['stage']=='review' and not state.get('timing_attempted'):
+                    st.write('Check complete action ranges and suitable surrounding footage against the saved narration. Compatible selections will render automatically; unresolved cases remain flagged.')
+                    timing_consent=st.checkbox('Check timing using existing OpenAI credits.',key='timing-consent-'+ident)
+                    if st.button('Resolve timing and render',disabled=not timing_consent,key='timing-'+ident):
+                        try:
+                            manager().resolve_timing(ident,email,settings())
+                            st.rerun()
+                        except (ValueError,PermissionError) as exc:st.error(str(exc))
             for name in ['matches.xlsx','report.json','audio-adjustments.json','preview.mp4','editable-package.zip']:
                 path=manager().file(ident,email,name)
                 if path.is_file():

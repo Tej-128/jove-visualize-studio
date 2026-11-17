@@ -84,6 +84,19 @@ class Jobs:
             self.futures[ident]=self.executor.submit(run,folder,owner,text,config)
         return ident
 
+    def resolve_timing(self,ident,owner,config):
+        with self.lock:
+            state=self.state(ident,owner)
+            if state['status']!='needs_review' or state.get('completed_visual_steps')!=state.get('step_count'):
+                raise ValueError('Finish visual review before resolving timing.')
+            if state.get('timing_attempted'):raise ValueError('The timing pass is complete. Unresolved footage requires review.')
+            if any(not f.done() for f in self.futures.values()):raise ValueError('Wait for the current project to finish.')
+            folder=self.root/ident
+            state.update(status='queued',stage='timing',error=None,updated=time.time())
+            write_json(folder/'state.json',state)
+            self.futures[ident]=self.executor.submit(run_timing,folder,owner,config)
+        return ident
+
     def diagnostics(self,ident,owner):
         self.state(ident,owner)
         folder=self.root/ident
@@ -204,7 +217,7 @@ def run(folder,owner,text,config):
             'selected_video_seconds':s['end']-s['start'],'tempo':s['tempo'],'review':s['needs_timing_review']} for s in shots])
         for name in ['report.json','audio-adjustments.json']:store.upload(folder/name,remote)
         if issues:
-            checkpoint('review','needs_review',issues=issues);return
+            checkpoint('review','needs_review',issues=issues,detail='Visual review is complete. Resolve the flagged timing or footage issues before rendering.');return
         # Reconstruct local cache paths rather than trusting stale absolute paths.
         for shot in shots:
             shot['path']=str(library.video(shot['video_id']))
@@ -241,4 +254,83 @@ def run(folder,owner,text,config):
             except Exception:pass
     finally:
         if index:index.connection.close()
+
+
+def run_timing(folder,owner,config):
+    """Reconcile only flagged durations, retaining narration and earlier matching work."""
+    from .reconciliation import reconcile_step
+    from .timing import fit_audio
+    state=json.loads((folder/'state.json').read_text());store=None;remote=state['output_folder_id']
+    if state['owner']!=owner:raise PermissionError('This project belongs to another user')
+    report=json.loads((folder/'report.json').read_text())
+    backup=folder/'report-before-timing.json'
+    if not backup.exists():write_json(backup,report)
+    def checkpoint(detail,status='running',stage='timing',**details):
+        state.update(status=status,stage=stage,detail=detail,updated=time.time(),**details)
+        write_json(folder/'state.json',state)
+        print(f"[job {state['id'][:8]}] {stage}: {detail}",flush=True)
+        if store:store.upload(folder/'state.json',remote)
+    def save_report():
+        write_json(folder/'report.json',report)
+        if store:store.upload(folder/'report.json',remote)
+    try:
+        store=DriveStore(config['google_service_account'])
+        checkpoint('Loading saved selections and narration. No narration is being regenerated.')
+        library=Library.from_folder(store,config['LIBRARY_FOLDER_ID'],folder.parent/'library-cache')
+        steps=parse_steps_from_text((folder/'input.txt').read_text(encoding='utf-8'))
+        stepmap={s.number:s for s in steps};shots=report['selected']
+        if len(shots)!=len(steps) or len({s['step'] for s in shots})!=len(steps):
+            raise ValueError('Some steps have no verified footage; resolve them before the timing pass.')
+        if any(s['step'] not in stepmap or s['text']!=stepmap[s['step']].text for s in shots):
+            raise ValueError('Saved selections do not match the script.')
+        targets=[i for i,s in enumerate(shots) if fit_audio(s['audio_duration'],s['end']-s['start']).needs_review]
+        checkpoint(f'Rechecking {len(targets)} duration mismatches against the existing narration.',timing_total=len(targets),timing_completed=0)
+        gateway=ModelGateway(config['OPENAI_API_KEY'],config.get('VISION_MODEL','gpt-4.1-mini'),int(config.get('MAX_VISION_CALLS',80)),
+                             cache_dir=folder/'timing-review'/'cache',
+                             progress=lambda done,limit:checkpoint(state['detail'],vision_requests=done,vision_request_limit=limit))
+        report.setdefault('timing_attempts',[])
+        for done,i in enumerate(targets):
+            shot=shots[i]
+            chosen,attempts=reconcile_step(stepmap[shot['step']],shot,report.get('attempts',[]),shot['audio_duration'],
+                library,gateway,folder/'timing-evidence',progress=checkpoint)
+            report['timing_attempts'].extend(attempts)
+            if chosen:shots[i]=chosen
+            report['timing_model_requests']=gateway.prior_calls+gateway.calls
+            save_report()
+            checkpoint(f"Timing checked for step {shot['step']}: "+('compatible range found.' if chosen else 'no compatible complete action verified.'),timing_completed=done+1)
+        # Replace timing flags only; preserve any unrelated scientific or missing-footage issue.
+        issues=[x for x in report.get('issues',[]) if not x.get('reason','').startswith(('Narration adjustment','Abrupt adjacent narration tempo change','No duration-compatible'))]
+        for shot in shots:
+            decision=fit_audio(shot['audio_duration'],shot['end']-shot['start'])
+            shot['tempo']=decision.tempo;shot['needs_timing_review']=decision.needs_review
+            if decision.needs_review:
+                issues.append({'step':shot['step'],'reason':'No duration-compatible complete action was verified. Review footage or revise the narration.',
+                               'audio_seconds':round(shot['audio_duration'],2),'video_seconds':round(shot['end']-shot['start'],2),'tempo':round(shot['tempo'],4)})
+        for i in pacing_outliers([s['tempo'] for s in shots]):
+            issues.append({'step':shots[i]['step'],'reason':'Abrupt adjacent narration tempo change; select a different range or review.'})
+        report['issues']=issues;report['timing_pass_complete']=True
+        save_report()
+        adjustments=[{'step':s['step'],'original_audio_seconds':s['audio_duration'],'selected_video_seconds':s['end']-s['start'],
+                      'tempo':s['tempo'],'review':s['needs_timing_review']} for s in shots]
+        write_json(folder/'audio-adjustments.json',adjustments);store.upload(folder/'audio-adjustments.json',remote)
+        state['timing_attempted']=True
+        if issues:
+            checkpoint('Timing reconciliation finished. The remaining steps need footage or narration review.',status='needs_review',stage='review',issues=issues);return
+        checkpoint('Timing is compatible. Rendering the video draft.',stage='assembly',issues=[])
+        for i,shot in enumerate(shots):
+            shot['path']=str(library.video(shot['video_id']))
+            shot['audio_path']=str(folder/f'narration-{next(j for j,s in enumerate(steps) if s.number==shot["step"])+1:03}.wav')
+        verification=render(shots,folder)
+        for name in ['preview.mp4','editable-package.zip','edit_plan.json']:store.upload(folder/name,remote)
+        checkpoint('Draft rendered. Review scientific fit and complete playback before production use.',status='complete',stage='complete',verification=verification)
+    except Exception as exc:
+        trace=[{'file':Path(f.filename).name,'line':f.lineno,'function':f.name} for f in traceback.extract_tb(exc.__traceback__)]
+        failure={'exception':type(exc).__name__,'stage':state.get('stage'),'trace':trace}
+        write_json(folder/'failure.json',failure)
+        print(f"[job {state['id'][:8]}] failed: {json.dumps(failure)}",flush=True)
+        state.update(status='failed',error=f'{type(exc).__name__}: timing processing stopped. Download private diagnostics.',updated=time.time())
+        write_json(folder/'state.json',state)
+        if store:
+            try:store.upload(folder/'state.json',remote);store.upload(folder/'failure.json',remote)
+            except Exception:pass
 
