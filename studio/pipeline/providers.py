@@ -3,27 +3,67 @@ import io
 import json
 import math
 import wave
+import hashlib
+import time
 from pathlib import Path
 import requests
 from openai import OpenAI
 from .tts_preprocessor import prepare_script_for_tts
 
+class VisionBudgetExceeded(RuntimeError):
+    pass
+
 class ModelGateway:
-    def __init__(self,api_key,model,max_calls=80):
-        self.client=OpenAI(api_key=api_key,timeout=120,max_retries=1)
+    def __init__(self,api_key,model,max_calls=80,cache_dir=None,progress=None):
+        self.client=OpenAI(api_key=api_key,timeout=90,max_retries=0)
         self.model=model;self.max_calls=max_calls;self.calls=[]
+        self.cache_dir=Path(cache_dir) if cache_dir else None
+        self.progress=progress;self.cache_hits=0
+        self.prior_calls=[]
+        if self.cache_dir:
+            self.cache_dir.mkdir(parents=True,exist_ok=True)
+            journal=self.cache_dir.parent/'model-requests.json'
+            if journal.exists():self.prior_calls=json.loads(journal.read_text(encoding='utf-8'))
+
+    def ensure_capacity(self):
+        if len(self.calls)>=self.max_calls:
+            raise VisionBudgetExceeded('The visual review request limit was reached. Saved work is retained; review or continue the saved project.')
 
     def ask(self,instructions,payload,images=()):
-        if len(self.calls)>=self.max_calls:raise RuntimeError('Job AI request limit reached; review before continuing.')
-        self.calls.append({'status':'started'})
+        fingerprint=hashlib.sha256(json.dumps([self.model,instructions,payload,list(images)],sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+        cached=self.cache_dir/(fingerprint+'.json') if self.cache_dir else None
+        if cached and cached.exists():
+            self.cache_hits+=1
+            return json.loads(cached.read_text(encoding='utf-8'))
+        self.ensure_capacity()
+        self.calls.append({'status':'started','request_hash':fingerprint})
+        self._save_calls()
         contents=[{'type':'text','text':json.dumps(payload,ensure_ascii=False)}]
         for im in images:
             contents.extend([{'type':'text','text':f'Source time {im["time"]} seconds'},
                              {'type':'image_url','image_url':{'url':im['data'],'detail':'low'}}])
-        r=self.client.chat.completions.create(model=self.model,messages=[{'role':'system','content':instructions},
-            {'role':'user','content':contents}],response_format={'type':'json_object'})
-        self.calls[-1]={'status':'complete','id':r.id,'tokens':r.usage.total_tokens if r.usage else None}
-        return json.loads(r.choices[0].message.content)
+        started=time.monotonic()
+        try:
+            r=self.client.chat.completions.create(model=self.model,messages=[{'role':'system','content':instructions},
+                {'role':'user','content':contents}],response_format={'type':'json_object'})
+            answer=json.loads(r.choices[0].message.content)
+            if not isinstance(answer,dict):raise ValueError('Visual review returned an invalid response shape')
+            self.calls[-1].update(status='complete',id=r.id,tokens=r.usage.total_tokens if r.usage else None)
+            if cached:
+                temp=cached.with_suffix('.temporary');temp.write_text(json.dumps(answer),encoding='utf-8');temp.replace(cached)
+            return answer
+        except Exception as exc:
+            self.calls[-1].update(status='failed',exception=type(exc).__name__)
+            raise
+        finally:
+            self.calls[-1]['elapsed_seconds']=round(time.monotonic()-started,2)
+            self._save_calls()
+            if self.progress:self.progress(len(self.calls),self.max_calls)
+
+    def _save_calls(self):
+        if self.cache_dir:
+            dest=self.cache_dir.parent/'model-requests.json'
+            temp=dest.with_suffix('.temporary');temp.write_text(json.dumps(self.prior_calls+self.calls),encoding='utf-8');temp.replace(dest)
 
 def generate_step_audio(text,previous,next_text,voice_id,speed,api_key,dest,output_format='pcm_44100'):
     chunks,_=prepare_script_for_tts(text)

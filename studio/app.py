@@ -45,7 +45,8 @@ from pipeline.storage import DriveStore
 @st.cache_resource
 def manager():
     root=Path(tempfile.gettempdir())/'jove-studio-jobs'
-    return Jobs(root)
+    jobs=Jobs(root)
+    return jobs
 
 def settings():
     keys=['OPENAI_API_KEY','ELEVENLABS_API_KEY','google_service_account','LIBRARY_FOLDER_ID','OUTPUT_FOLDER_ID']
@@ -119,6 +120,15 @@ with tabs[1]:
             if state['status'] in {'failed','needs_review'}:
                 st.download_button('Download private diagnostics',manager().diagnostics(ident,email),
                     file_name='project-diagnostics.zip',key='download-diagnostics',mime='application/zip')
+                if state['status']=='failed' or state['stage']=='visual_verification':
+                    st.caption('Continue reuses saved matches, narration and completed frame assessments. It can use more of your existing OpenAI credits, within the configured request limit.')
+                    resume_consent=st.checkbox('Continue this saved project using existing credits.',key='resume-consent-'+ident)
+                    if st.button('Continue saved project',disabled=not resume_consent,key='resume-'+ident):
+                        try:
+                            cfg=settings();cfg['voice']=dict(profiles[profile])
+                            manager().resume(ident,email,cfg)
+                            st.rerun()
+                        except (ValueError,PermissionError) as exc:st.error(str(exc))
             if state.get('issues'):
                 st.warning('Review is required before a complete edit can be rendered.')
                 st.dataframe(state['issues'],hide_index=True,use_container_width=True)

@@ -23,7 +23,7 @@ from jove_visualizer.pipeline import match_steps
 from jove_visualizer.reporting import results_to_json,results_to_excel
 from .storage import DriveStore
 from .library import Library
-from .providers import ModelGateway,generate_step_audio
+from .providers import ModelGateway,generate_step_audio,VisionBudgetExceeded
 from .selection import Selector
 from .timing import pacing_outliers
 from .render import render
@@ -72,12 +72,24 @@ class Jobs:
             except (OSError,ValueError):continue
         return sorted(projects,key=lambda s:s.get('created',0),reverse=True)
 
+    def resume(self,ident,owner,config):
+        with self.lock:
+            state=self.state(ident,owner)
+            if state['status'] not in {'failed','needs_review'}:raise ValueError('This project is not paused or failed.')
+            if any(not f.done() for f in self.futures.values()):raise ValueError('Wait for the current project to finish.')
+            folder=self.root/ident
+            text=(folder/'input.txt').read_text(encoding='utf-8')
+            state.update(status='queued',stage='recovery',error=None,issues=[],updated=time.time())
+            write_json(folder/'state.json',state)
+            self.futures[ident]=self.executor.submit(run,folder,owner,text,config)
+        return ident
+
     def diagnostics(self,ident,owner):
         self.state(ident,owner)
         folder=self.root/ident
         output=io.BytesIO()
         with zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as archive:
-            for name in ['state.json','report.json','failure.json']:
+            for name in ['state.json','report.json','failure.json','model-requests.json']:
                 path=folder/name
                 if path.is_file():archive.write(path,name)
             # Only local media-processing logs, never settings or credentials.
@@ -94,7 +106,7 @@ def run(folder,owner,text,config):
         if store and remote:store.upload(folder/'state.json',remote)
     try:
         store=DriveStore(config['google_service_account'])
-        remote=store.folder(config['OUTPUT_FOLDER_ID'],'job-'+state['id'])
+        remote=state.get('output_folder_id') or store.folder(config['OUTPUT_FOLDER_ID'],'job-'+state['id'])
         store.upload(folder/'input.txt',remote)
         checkpoint('library',output_folder_id=remote)
         library=Library.from_folder(store,config['LIBRARY_FOLDER_ID'],folder.parent/'library-cache')
@@ -121,23 +133,50 @@ def run(folder,owner,text,config):
         checkpoint('matching',step_count=len(steps),media_count=len(library.videos))
         def matching_progress(done,total,message):
             checkpoint('matching',matching_completed=done,matching_total=total,detail=message)
-        results=match_steps(index,steps,settings,api_key=config['OPENAI_API_KEY'],progress=matching_progress)
-        results_to_json(results,folder/'matches.json');results_to_excel(results,folder/'matches.xlsx')
-        store.upload(folder/'matches.json',remote);store.upload(folder/'matches.xlsx',remote)
+        if (folder/'matches.json').exists():
+            saved=json.loads((folder/'matches.json').read_text())
+            if len(saved)!=len(steps) or any(row.get('script_step')!=step.text or row.get('step_number')!=step.number for row,step in zip(saved,steps)):
+                raise ValueError('Saved matches do not match this script; start a new project.')
+            checkpoint('matching',detail='Reusing saved timestamp matches')
+        else:
+            results=match_steps(index,steps,settings,api_key=config['OPENAI_API_KEY'],progress=matching_progress)
+            results_to_json(results,folder/'matches.json');results_to_excel(results,folder/'matches.xlsx')
+            store.upload(folder/'matches.json',remote);store.upload(folder/'matches.xlsx',remote)
         checkpoint('narration')
         voice=config['voice'];audios=[]
         for i,step in enumerate(steps):
             path=folder/f'narration-{i+1:03}.wav'
-            info=generate_step_audio(step.text,step.previous_text,step.next_text,voice['id'],float(voice['speed']),
-                                     config['ELEVENLABS_API_KEY'],path)
+            if path.exists() and path.with_suffix('.json').exists():
+                info=json.loads(path.with_suffix('.json').read_text())
+                from .tts_preprocessor import prepare_script_for_tts
+                spoken='\n\n'.join(prepare_script_for_tts(step.text)[0])
+                if info.get('spoken')!=spoken or info.get('voice_id')!=voice['id'] or info.get('generation_speed')!=float(voice['speed']):
+                    raise ValueError('Saved narration uses a different script or voice profile; choose its original profile or start a new project.')
+            else:
+                info=generate_step_audio(step.text,step.previous_text,step.next_text,voice['id'],float(voice['speed']),
+                                         config['ELEVENLABS_API_KEY'],path)
+                store.upload(path,remote);store.upload(path.with_suffix('.json'),remote)
             audios.append({**info,'path':str(path)})
-            store.upload(path,remote);store.upload(path.with_suffix('.json'),remote)
             checkpoint('narration',completed_audio_steps=i+1)
         checkpoint('visual_verification')
-        gateway=ModelGateway(config['OPENAI_API_KEY'],config.get('VISION_MODEL','gpt-4.1-mini'),int(config.get('MAX_VISION_CALLS',80)))
+        def vision_progress(done,limit):
+            checkpoint('visual_verification',vision_requests=done,vision_request_limit=limit)
+        gateway=ModelGateway(config['OPENAI_API_KEY'],config.get('VISION_MODEL','gpt-4.1-mini'),int(config.get('MAX_VISION_CALLS',80)),
+                             cache_dir=folder/'review-cache',progress=vision_progress)
         matcher=Selector(index,library,gateway,folder/'evidence')
         matches=json.loads((folder/'matches.json').read_text());shots=[];issues=[]
+        completed=min(len(steps),int(state.get('completed_visual_steps',0)))
+        if completed and (folder/'report.json').exists():
+            report=json.loads((folder/'report.json').read_text())
+            if not gateway.prior_calls:gateway.prior_calls=report.get('model_requests',[])
+            prior={s.number:s.text for s in steps[:completed]}
+            shots=report.get('selected',[])
+            if any(s.get('step') not in prior or s.get('text')!=prior[s['step']] for s in shots):
+                raise ValueError('Saved visual selections do not match this script.')
+            issues=[x for x in report.get('issues',[]) if x.get('step') in prior]
+            matcher.attempts=report.get('attempts',[])
         for i,(step,row,audio) in enumerate(zip(steps,matches,audios)):
+            if i<completed:continue
             checkpoint('visual_verification',completed_visual_steps=i,total_visual_steps=len(steps),detail=f'Reviewing video frames for step {i+1} of {len(steps)}')
             options=[row.get('best_match'),*row.get('additional_timestamps_same_id',[]),*row.get('alternatives',[])]
             from .sheets import seconds
@@ -152,12 +191,13 @@ def run(folder,owner,text,config):
             else:
                 chosen.update(audio_path=audio['path'],audio_duration=audio['duration']);shots.append(chosen)
                 if chosen['needs_timing_review']:issues.append({'step':step.number,'reason':'Narration adjustment is outside the pilot automatic range.','tempo':chosen['tempo']})
-            write_json(folder/'report.json',{'issues':issues,'selected':shots,'attempts':matcher.attempts,'model_requests':gateway.calls,
+            write_json(folder/'report.json',{'issues':issues,'selected':shots,'attempts':matcher.attempts,'model_requests':gateway.prior_calls+gateway.calls,
                 'review_method':'Sampled-frame AI review; no human visual approval is implied.'})
+            store.upload(folder/'report.json',remote)
             checkpoint('visual_verification',completed_visual_steps=i+1)
         tempos=[s['tempo'] for s in shots]
         for i in pacing_outliers(tempos):issues.append({'step':shots[i]['step'],'reason':'Abrupt adjacent narration tempo change; select a different range or review.'})
-        write_json(folder/'report.json',{'issues':issues,'selected':shots,'attempts':matcher.attempts,'model_requests':gateway.calls,
+        write_json(folder/'report.json',{'issues':issues,'selected':shots,'attempts':matcher.attempts,'model_requests':gateway.prior_calls+gateway.calls,
             'trained_ranking_enabled':False,'reviewer_memory_enabled':False,
             'review_method':'Sampled-frame AI review; complete playback review remains required.'})
         write_json(folder/'audio-adjustments.json',[{'step':s['step'],'original_audio_seconds':s['audio_duration'],
@@ -165,12 +205,23 @@ def run(folder,owner,text,config):
         for name in ['report.json','audio-adjustments.json']:store.upload(folder/name,remote)
         if issues:
             checkpoint('review','needs_review',issues=issues);return
+        # Reconstruct local cache paths rather than trusting stale absolute paths.
+        for shot in shots:
+            shot['path']=str(library.video(shot['video_id']))
+            shot['audio_path']=audios[next(i for i,s in enumerate(steps) if s.number==shot['step'])]['path']
         checkpoint('assembly')
         verification=render(shots,folder)
         checkpoint('delivery',verification=verification)
         for name in ['preview.mp4','editable-package.zip','edit_plan.json']:store.upload(folder/name,remote)
         checkpoint('complete','complete',verification=verification,
             note='Draft generated. Review scientific fit, visual continuity and narration playback before production use.')
+    except VisionBudgetExceeded:
+        issues.append({'step':step.number,'reason':'Visual review request limit reached. Further steps are unverified. Continue the saved project or review its candidates.'})
+        write_json(folder/'report.json',{'issues':issues,'selected':shots,'attempts':matcher.attempts,'model_requests':gateway.prior_calls+gateway.calls,
+            'review_method':'Incomplete sampled-frame review; no complete edit or scientific approval is implied.'})
+        store.upload(folder/'report.json',remote)
+        checkpoint('visual_verification','needs_review',issues=issues,error=None,
+                   detail='Visual review paused at its request limit. Matching and narration are saved.')
     except Exception as e:
         # Avoid exposing provider messages, request bodies, or credential-bearing URLs.
         message=str(e) if isinstance(e,(ValueError,PermissionError)) else f'{type(e).__name__}: processing stopped; inspect the private server log.'

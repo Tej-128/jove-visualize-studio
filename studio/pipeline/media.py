@@ -8,7 +8,7 @@ import imageio_ffmpeg
 
 def execute(args,log):
     with Path(log).open('w',encoding='utf-8') as f:
-        p=subprocess.run([str(imageio_ffmpeg.get_ffmpeg_exe()),'-hide_banner','-nostdin','-y',*map(str,args)],stdout=f,stderr=subprocess.STDOUT)
+        p=subprocess.run([str(imageio_ffmpeg.get_ffmpeg_exe()),'-hide_banner','-nostdin','-y',*map(str,args)],stdout=f,stderr=subprocess.STDOUT,timeout=300)
     if p.returncode:raise RuntimeError(f'Media processing failed; see {Path(log).name}')
 
 def sample_frames(path,start,end,folder,count=16):
@@ -27,7 +27,7 @@ def sample_frames(path,start,end,folder,count=16):
 def duration(path):
     # FFmpeg prints its probed duration even when no output is selected.
     import re
-    p=subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(),'-hide_banner','-i',str(path)],capture_output=True,text=True)
+    p=subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(),'-hide_banner','-i',str(path)],capture_output=True,text=True,timeout=30)
     m=re.search(r'Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)',p.stderr)
     if not m:raise ValueError('Unknown media duration')
     h,m,s=map(float,m.groups());return h*3600+m*60+s

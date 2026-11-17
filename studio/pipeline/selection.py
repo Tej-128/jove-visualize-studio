@@ -20,7 +20,7 @@ class Selector:
         location=self.folder/f'attempt-{len(self.attempts):04}'
         result=self.gateway.ask(VISUAL_RULES,{'step':step.text,'caption':candidate.get('caption',''),
             'range_start':start,'range_end':end},sample_frames(path,start,end,location/'broad',16))
-        attempt={**candidate,'tier':tier,'status':'visually_rejected','assessment':result}
+        attempt={**candidate,'step':step.number,'tier':tier,'status':'visually_rejected','assessment':result}
         self.attempts.append(attempt)
         if result.get('suitable') is not True or result.get('complete_action') is not True:return None
         a,b=float(result['start']),float(result['end'])
