@@ -85,6 +85,28 @@ class AutomaticSelectionTests(unittest.TestCase):
             library.restore_overviews.assert_not_called()
             self.assertNotIn('reference',json.dumps(gateway.ask.call_args_list[0].args[1]).lower())
 
+    def test_missing_caption_video_is_checked_before_caption_fallback_exhausts_the_budget(self):
+        step=SimpleNamespace(number=1,text='Transfer flies into the tube.')
+        index=Mock();index.connection.execute.return_value.fetchall.return_value=[('101',)]
+        with TemporaryDirectory() as t:
+            library=SimpleNamespace(videos={'101':{'sha256':'a'*64,'filename':'101.mp4'},
+                '202':{'sha256':'b'*64,'filename':'202_Fly_Climbing.mp4'}},cache=Path(t),restore_overviews=Mock())
+            editor=AutomaticEditor(index,library,Mock(),t,[step],{1:{'duration':7}},workers=1)
+            editor.catalog=Mock(return_value=[{'step':1,'video_id':'202','start':1,'end':4}])
+            tiers=[]
+            def phase(steps,pools,tier):
+                tiers.append(tier)
+                if tier=='wider_library_visual' and pools.get(1):
+                    editor.plans[1]={'step':1,'text':step.text,'shots':[{'video_id':'202'}],
+                        'missing_actions':[],'unobservable_details':[],'needs_review':False,'dense_checked':True}
+            editor.inspect_phase=phase
+            with patch('pipeline.automatic_edit.Selector.wider_candidates') as caption_fallback:
+                result=editor.run([{'step_number':1,'best_match':None}])
+            self.assertEqual(result[0]['shots'][0]['video_id'],'202')
+            editor.catalog.assert_called_once_with('202')
+            caption_fallback.assert_not_called()
+            self.assertLess(tiers.index('suggested_timestamp'),tiers.index('wider_library_visual'))
+
     def test_provider_failure_preserves_an_explicitly_unverified_retrieved_candidate(self):
         step=SimpleNamespace(number=1,text='Transfer flies into the tube.')
         matches=[dict(step_number=1,best_match=dict(journal_id='101',start_timestamp='00:01',end_timestamp='00:04',caption_passage='Transfer flies.'))]

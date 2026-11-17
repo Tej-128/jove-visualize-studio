@@ -202,6 +202,24 @@ class AutomaticEditor:
             grouped={s.number:[c for c in found if c['step']==s.number] for s in targets}
             for number,items in grouped.items():self.sources[number].extend(items)
             self.inspect_phase(targets,grouped,'full_suggested_video')
+        # Missing-caption videos must not wait until the caption-only fallback has
+        # exhausted the review budget. This is wider search, after suggested tiers.
+        try:
+            ids=list(self.library.videos);marks=','.join('?' for _ in ids)
+            indexed={str(r[0]) for r in self.index.connection.execute(
+                f'SELECT DISTINCT article_id FROM passages WHERE article_id IN ({marks})',ids).fetchall()}
+        except Exception:indexed=set()
+        words=set(re.findall(r'[a-z]{4,}', ' '.join(s.text.lower() for s in self.steps)))
+        missing_captions=sorted([v for v in self.library.videos if v not in indexed],
+            key=lambda v:-sum(w[:5] in self.library.videos[v]['filename'].lower() for w in words))
+        for vid in missing_captions:
+            if not pending() or time.monotonic()>=self.deadline:break
+            if vid in self.catalogs:continue
+            try:found=self.catalog(vid)
+            except Exception:continue
+            grouped={s.number:[c for c in found if c['step']==s.number] for s in pending()}
+            for number,items in grouped.items():self.sources[number].extend(items)
+            self.inspect_phase(pending(),grouped,'wider_library_visual')
         # Caption retrieval is restricted to available media. It also supplies an honest
         # unverified candidate if external review runs out of time or requests.
         selector=Selector(self.index,self.library,self.gateway,self.folder/'retrieval')
