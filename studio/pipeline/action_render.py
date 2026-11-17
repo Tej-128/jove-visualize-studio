@@ -111,7 +111,7 @@ def render_actions(plans,audios,library,folder,fps='30000/1001',width=1280,heigh
     (folder/'edit_plan.json').write_text(json.dumps(plan,indent=2),encoding='utf-8')
     (folder/'audio-adjustments.json').write_text(json.dumps(adjustments,indent=2),encoding='utf-8')
     with zipfile.ZipFile(folder/'editable-package.zip','w',compression=zipfile.ZIP_STORED) as archive:
-        for path in [folder/'editable.mlt',folder/'edit_plan.json',folder/'narration.wav',*media.glob('shot-*.mp4')]:
+        for path in [folder/'editable.mlt',folder/'edit_plan.json',folder/'narration.wav',*[media/f'shot-{i+1:03}.mp4' for i in range(len(shots))]]:
             archive.write(path,path.relative_to(folder).as_posix())
     return {'frames':frames,'fps':fps,'duration':frames/float(rate),'shots':len(shots),'steps':len(plans),
             'review_only':any(s['review'] for s in shots),'placeholder_steps':[],

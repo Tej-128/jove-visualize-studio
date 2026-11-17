@@ -75,15 +75,48 @@ class AutomaticSelectionTests(unittest.TestCase):
             library.restore_overviews=Mock()
             gateway=Mock();gateway.ask.side_effect=[response(),response('d0')]
             with patch('pipeline.automatic_edit.duration',return_value=20),patch('pipeline.automatic_edit.sample_window',return_value=[]):
-                editor=AutomaticEditor(None,library,gateway,t,[step],{1:{'duration':7}},workers=1)
+                editor=AutomaticEditor(None,library,gateway,t,[step],{1:{'duration':2}},workers=1)
                 result=editor.run(matches)
             self.assertEqual(result[0]['shots'][0]['video_id'],'101')
             self.assertTrue(result[0]['dense_checked'])
             self.assertEqual(gateway.ask.call_count,2)
             dense_window=gateway.ask.call_args_list[1].args[1]['windows'][0]
-            self.assertGreaterEqual(dense_window['end']-dense_window['start'],3.5)
+            self.assertGreaterEqual(dense_window['end']-dense_window['start'],2.5)
             library.restore_overviews.assert_not_called()
             self.assertNotIn('reference',json.dumps(gateway.ask.call_args_list[0].args[1]).lower())
+
+    def test_brief_action_gets_verified_context_instead_of_extreme_slow_motion(self):
+        step=SimpleNamespace(number=1,text='Transfer flies into the tube.')
+        plan={'step':1,'text':step.text,'needs_review':False,'missing_actions':[],'unobservable_details':[],
+            'shots':[{'video_id':'101','start':5.,'end':5.7,'action_start':5.,'action_end':5.7,
+                'tier':'suggested_timestamp','evidence':'demonstrated','covered_actions':['Transfer flies'],'reason':'Visible transfer.'}]}
+        gateway=Mock();fixed=response('t0');fixed['shots'][0].update(start=1.35,end=9.35,action_start=5.,action_end=5.7)
+        gateway.ask.return_value=fixed
+        with TemporaryDirectory() as t:
+            library=SimpleNamespace(videos={'101':{'sha256':'a'*64,'filename':'101.mp4'}},video=lambda _:Path('source.mp4'),cache=Path(t),
+                caption_context=Mock(return_value=[{'start':1,'end':10,'text':'Actual source transfer procedure.'}]))
+            editor=AutomaticEditor(None,library,gateway,t,[step],{1:{'duration':8}},workers=1)
+            with patch('pipeline.automatic_edit.sample_window',return_value=[]):
+                result=editor.fit_context(step,plan,[{'window_id':'d0','video_id':'101','start':0.,'end':12.}])
+            self.assertTrue(result['timing_context_verified'])
+            self.assertAlmostEqual(result['shots'][0]['end']-result['shots'][0]['start'],8)
+            sent=gateway.ask.call_args.args[1]['windows'][0]
+            self.assertEqual(sent['source_captions'][0]['text'],'Actual source transfer procedure.')
+            strict=gateway.ask.call_args.kwargs['schema']['properties']['shots']['items']['properties']
+            self.assertEqual(strict['start']['enum'],[1.35]);self.assertEqual(strict['end']['enum'],[9.35])
+
+    def test_source_caption_grounding_is_present_in_both_visual_checks(self):
+        step=SimpleNamespace(number=1,text='Transfer flies into the tube.')
+        with TemporaryDirectory() as t:
+            lookup=Mock(return_value=[{'start':0,'end':5,'text':'Actual source procedure, not a visual discovery claim.'}])
+            library=SimpleNamespace(videos={'101':{'sha256':'a'*64,'filename':'101.mp4'}},video=lambda _:Path('source.mp4'),cache=Path(t),caption_context=lookup)
+            gateway=Mock();gateway.ask.side_effect=[response(),response('d0')]
+            editor=AutomaticEditor(None,library,gateway,t,[step],{1:{'duration':2}},workers=1)
+            with patch('pipeline.automatic_edit.duration',return_value=20),patch('pipeline.automatic_edit.sample_window',return_value=[]):
+                result=editor.inspect(step,[{'video_id':'101','start':.5,'end':4,'caption':'Untrusted earlier guess.'}],'full_suggested_video')
+            self.assertIsNotNone(result)
+            for call in gateway.ask.call_args_list:
+                self.assertEqual(call.args[1]['windows'][0]['source_captions'][0]['text'],'Actual source procedure, not a visual discovery claim.')
 
     def test_missing_caption_video_is_checked_before_caption_fallback_exhausts_the_budget(self):
         step=SimpleNamespace(number=1,text='Transfer flies into the tube.')
@@ -109,7 +142,7 @@ class AutomaticSelectionTests(unittest.TestCase):
 
     def test_provider_failure_preserves_an_explicitly_unverified_retrieved_candidate(self):
         step=SimpleNamespace(number=1,text='Transfer flies into the tube.')
-        matches=[dict(step_number=1,best_match=dict(journal_id='101',start_timestamp='00:01',end_timestamp='00:04',caption_passage='Transfer flies.'))]
+        matches=[dict(step_number=1,best_match=dict(journal_id='101',start_timestamp='00:01',end_timestamp='00:10',caption_passage='Transfer flies.'))]
         with TemporaryDirectory() as t:
             library=SimpleNamespace(videos={'101':{'sha256':'a'*64,'filename':'101.mp4'}},video=lambda _:Path('source.mp4'),cache=Path(t),
                                     restore_overviews=Mock(),has_prepared_overview=lambda _:True)
@@ -122,6 +155,23 @@ class AutomaticSelectionTests(unittest.TestCase):
             self.assertTrue(result[0]['needs_review'])
             self.assertEqual(result[0]['shots'][0]['evidence'],'uncertain')
             self.assertEqual(result[0]['shots'][0]['tier'],'unverified_retrieval')
+
+    def test_review_fallback_preserves_a_brief_action_in_a_normal_speed_excerpt(self):
+        step=SimpleNamespace(number=1,text='Transfer flies into the tube.')
+        matches=[dict(step_number=1,best_match=dict(journal_id='101',start_timestamp='00:01',end_timestamp='00:12',caption_passage='Transfer flies.'))]
+        with TemporaryDirectory() as t:
+            library=SimpleNamespace(videos={'101':{'sha256':'a'*64,'filename':'101.mp4'}},video=lambda _:Path('source.mp4'),cache=Path(t),restore_overviews=Mock())
+            editor=AutomaticEditor(None,library,Mock(),t,[step],{1:{'duration':8}},workers=1)
+            editor.backups[1]={'step':1,'text':step.text,'needs_review':True,'missing_actions':[],'unobservable_details':[],
+                'shots':[{'video_id':'101','start':5.,'end':5.7,'action_start':5.,'action_end':5.7,'covered_actions':['Transfer flies']}]}
+            editor.inspect_phase=Mock();editor.catalog=Mock(return_value=[])
+            with patch('pipeline.automatic_edit.duration',return_value=20),patch('pipeline.automatic_edit.Selector.wider_candidates',return_value=[]):
+                result=editor.run(matches)
+            shot=result[0]['shots'][0]
+            self.assertAlmostEqual(shot['end']-shot['start'],8)
+            self.assertTrue(shot['known_action_sampled'])
+            self.assertLessEqual(shot['start'],5);self.assertGreaterEqual(shot['end'],5.7)
+            self.assertEqual(shot['evidence'],'uncertain');self.assertTrue(result[0]['needs_review'])
 
     def test_explicitly_rejected_window_is_not_relabelled_as_verified_fallback(self):
         step=SimpleNamespace(number=1,text='Transfer flies into the tube.')
@@ -207,6 +257,7 @@ class MultiShotMediaTests(unittest.TestCase):
             plans=[dict(step=1,text='Transfer and count.',needs_review=True,missing_actions=[],unobservable_details=['Count uncertain'],
                         shots=[dict(video_id='101',start=1.,end=3.,reason='Transfer.',evidence='demonstrated',tier='suggested_timestamp'),
                                dict(video_id='101',start=4.,end=6.,reason='Counting.',evidence='illustrative',tier='suggested_timestamp')])]
+            (out/'media').mkdir();(out/'media'/'shot-999.mp4').write_bytes(b'obsolete prior edit')
             result=render_actions(plans,{1:{'path':str(voice),'duration':4}},SimpleNamespace(video=lambda _:source),out,width=320,height=180)
             count,_=imageio_ffmpeg.count_frames_and_secs(str(out/'preview.mp4'))
             self.assertEqual(count,result['frames']);self.assertEqual(result['shots'],2)
@@ -214,6 +265,7 @@ class MultiShotMediaTests(unittest.TestCase):
             with wave.open(str(out/'narration.wav')) as audio:self.assertAlmostEqual(audio.getnframes()/audio.getframerate(),4,places=1)
             with zipfile.ZipFile(out/'editable-package.zip') as archive:
                 self.assertIn('media/shot-002.mp4',archive.namelist());self.assertIn('narration.wav',archive.namelist())
+                self.assertNotIn('media/shot-999.mp4',archive.namelist())
             mlt=ET.parse(out/'editable.mlt').getroot()
             resources=[x.text for x in mlt.findall('.//property[@name="resource"]')]
             self.assertNotIn(str(source),resources);self.assertIn('media/shot-001.mp4',resources)
