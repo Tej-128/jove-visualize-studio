@@ -10,7 +10,11 @@ import wave
 import zipfile
 import xml.etree.ElementTree as ET
 import imageio_ffmpeg
-from pipeline.automatic_edit import AutomaticEditor,validated_plan,plan_schema
+from pipeline.automatic_edit import AutomaticEditor as AuditedAutomaticEditor,validated_plan,plan_schema
+from functools import partial
+# These tests isolate selection/timing. Independent scientific auditing has its
+# own tests and remains enabled by default in the production editor.
+AutomaticEditor=partial(AuditedAutomaticEditor,audit_required=False)
 from pipeline.action_render import cut_schedule,render_actions,TimingCoverageError
 from pipeline.media import execute,sample_window
 from pipeline.providers import ModelGateway

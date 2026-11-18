@@ -466,7 +466,7 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
     # ten-minute target on discovery. Actual wall time is measured in the report.
     remaining=480-(time.monotonic()-config.get('_PIPELINE_STARTED',started))
     editor=AutomaticEditor(index,library,gateway,folder/'automatic',steps,audio_map,progress=progress,
-        seconds=max(1,min(int(config.get('VISUAL_REVIEW_SECONDS',240)),remaining)),workers=int(config.get('VISUAL_WORKERS',3)),action_catalog=catalog)
+        seconds=max(1,min(int(config.get('VISUAL_REVIEW_SECONDS',300)),remaining)),workers=int(config.get('VISUAL_WORKERS',3)),action_catalog=catalog)
     plans=editor.run(json.loads((folder/'matches.json').read_text()))
     missing=[s.number for s in steps if s.number not in {p['step'] for p in plans}]
     issues=[{'step':p['step'],'reason':'; '.join(p['missing_actions']+p['unobservable_details']) or 'Illustrative footage requires review.'}

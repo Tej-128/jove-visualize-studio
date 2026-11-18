@@ -22,6 +22,10 @@ Job requests use a SQLite queue with leases, heartbeats, duplicate-request preve
 
 The 5–10 minute target applies to a fresh short script against a prepared library, and must be measured including fresh matching, narration, selection and rendering. Library ingestion is a separate one-time process. Reports identify reused stages so a rebuild cannot be passed off as a fresh run.
 
+## Independent scientific audit (editor version 5)
+
+The first version-4 fresh trial met the runtime target but independent playback review found unsuitable scientific substitutions. Version 5 adds an independent review of the exact final cuts, using source introductions, local source captions and final-cut frames without the selector's favourable explanation. It distinguishes live experiment footage from animation, rejects unrelated section boundaries, and separates directly visible actions from inferences. Source contradictions cannot be promoted to accepted matches. Honest illustrations remain labelled review candidates while the editor searches for demonstrated alternatives. This is an additional AI check, not a guarantee of scientific correctness; a version-5 cloud validation is still required.
+
 ## Validation and limits
 
 Local automated checks cover candidate-first routing from a plain script, multi-shot selection, uncertainty handling, rejection of invented sources and timestamps, provider-failure fallback, concurrent request accounting, real video rendering, narration frame coverage, pitch preservation, portable assets, invitation and owner checks, and archive/cache validation.

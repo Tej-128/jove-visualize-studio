@@ -23,6 +23,8 @@ class EditorialGateTests(unittest.TestCase):
         self.assertEqual(action_units('Place tubes and vials on the bench.'),['Place tubes and vials on the bench'])
         self.assertEqual(action_units('Add 0.5 mL of reagent and incubate at 37.5 degrees.'),
                          ['Add 0.5 mL of reagent','incubate at 37.5 degrees'])
+        self.assertEqual(action_units('Group flies by sex and exposure day.'),['Group flies by sex and exposure day'])
+        self.assertEqual(action_units('Freeze and count flies, then assign a score.'),['Freeze','count flies','assign a score'])
 
     def test_model_cannot_silently_drop_the_second_script_action(self):
         answer={'shots':[{'window_id':'w0','start':1.,'end':3.,'evidence':'demonstrated',
