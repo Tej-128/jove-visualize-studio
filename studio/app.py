@@ -46,8 +46,8 @@ DriveStore=runtime.DriveStore
 
 @st.cache_resource
 def manager_for_build(recovery_version):
-    root=Path(tempfile.gettempdir())/'jove-studio-jobs'
-    return Jobs(root)
+    root=Path(os.environ.get('STUDIO_JOBS_ROOT',str(Path(tempfile.gettempdir())/'jove-studio-jobs')))
+    return Jobs(root,worker_config=settings(),external_worker=os.environ.get('STUDIO_EXTERNAL_WORKER')=='1')
 
 def manager():
     return manager_for_build(runtime.revision)
@@ -65,7 +65,7 @@ with st.sidebar:
     st.write('Sources: private Drive library. Narration: ElevenLabs. Text and frame analysis: OpenAI.')
     if st.button('Sign out'):st.logout()
 
-tabs=st.tabs(['Create video','Project status','Workflow'])
+tabs=st.tabs(['Create video','Project status','Workflow','Library readiness'])
 with tabs[0]:
     st.subheader('Start with your script')
     mode=st.radio('Script source',['Google Doc link','Word or text upload'],horizontal=True)
@@ -87,10 +87,8 @@ with tabs[0]:
                 text=DriveStore(config['google_service_account']).text_document(match.group(1))
             elif upload:
                 if upload.name.lower().endswith('.docx'):
-                    from docx import Document
-                    from io import BytesIO
-                    d=Document(BytesIO(upload.getvalue()));text='\n'.join(p.text for p in d.paragraphs)
-                    text+='\n'+'\n'.join(' | '.join(c.text for c in row.cells) for t in d.tables for row in t.rows)
+                    from pipeline.documents import word_script_text
+                    text=word_script_text(upload.getvalue())
                 else:text=upload.getvalue().decode('utf-8-sig')
             else:raise ValueError('Provide a script first.')
             ident=manager().submit(email,text,config)
@@ -110,6 +108,11 @@ with tabs[1]:
         except Exception:st.info('Saved cloud projects could not be restored automatically. The private Drive checkpoints are retained.')
     if not ident and recent:
         ident=recent[0]['id'];st.session_state['job_id']=ident
+    if recent:
+        options=[p['id'] for p in recent];labels={p['id']:('Library preparation' if p.get('kind')=='catalog' else 'Video project')+' · '+time.strftime('%d %b %H:%M',time.localtime(p.get('created',0)))+' · '+p['status'].replace('_',' ') for p in recent}
+        ident=st.selectbox('Project',options,index=options.index(ident) if ident in options else 0,
+                           format_func=lambda value:labels[value],key='projects-'+','.join(options))
+        st.session_state['job_id']=ident
     if not ident:st.write('Start a project from Create video.')
     else:
         @st.fragment(run_every='8s')
@@ -122,6 +125,15 @@ with tabs[1]:
             if state['stage']=='review' and not state.get('verification'):st.write('Visual review is complete. Resolve the flagged steps before rendering.')
             elif state.get('detail'):st.write(state['detail'])
             st.caption('Last reported activity: '+str(round(time.time()-state.get('updated',state.get('created',0))))+' seconds ago')
+            if state.get('kind')=='catalog':
+                if state.get('catalog_total'):st.progress(min(1.,state.get('catalog_completed',0)/state['catalog_total']))
+                if state.get('error'):st.error(state['error'])
+                if state['status']=='failed' and st.button('Continue library preparation'):
+                    manager().resume(ident,email,settings());st.rerun()
+                return
+            if state['status']=='queued':st.caption('Waiting for the processing worker. Other queued or active work finishes first.')
+            if state['status']=='running' and time.time()-state.get('updated',0)>90:
+                st.warning('No recent stage update. Saved work is retained; do not submit a duplicate project.')
             if state['stage']=='matching' and state.get('matching_total'):
                 st.progress(min(1.,state.get('matching_completed',0)/state['matching_total']),text=f"{state.get('matching_completed',0)} of {state['matching_total']} steps in this matching phase")
             if state['stage']=='visual_verification' and state.get('total_visual_steps'):
@@ -147,7 +159,22 @@ with tabs[1]:
             if state.get('issues') and state['status'] in {'needs_review','failed'}:
                 st.warning('Review the listed visual and timing limitations before production use.')
                 st.dataframe(state['issues'],hide_index=True,use_container_width=True)
-            for name in ['matches.xlsx','report.json','coverage.json','audio-adjustments.json','preview.mp4','editable-package.zip']:
+            plan_path=manager().file(ident,email,'edit_plan.json')
+            if state['status'] in {'needs_review','complete'} and plan_path.is_file():
+                with st.expander('Review footage by script step'):
+                    plan=json.loads(plan_path.read_text());numbers=list(dict.fromkeys(s['step'] for s in plan['shots']))
+                    number=st.selectbox('Script step',numbers,key='review-step-'+ident)
+                    selected=[(i,s) for i,s in enumerate(plan['shots']) if s['step']==number]
+                    for i,shot in selected:
+                        st.write(shot.get('text',''));st.caption(f"Source {shot['video_id']} · {shot['start']:.2f}–{shot['end']:.2f} seconds · {shot.get('evidence','uncertain')} · playback {shot.get('video_speed',1.):.2f}×")
+                        preview=manager().shot_preview(ident,email,i)
+                        if preview.is_file():st.video(str(preview))
+                    retry_consent=st.checkbox('Find different footage for this step using existing credits.',key='retry-consent-'+ident)
+                    if st.button('Reject these shots and find alternatives',disabled=not retry_consent,key='retry-'+ident):
+                        try:
+                            cfg=settings();cfg['voice']=dict(profiles[profile]);manager().review_step(ident,email,number,cfg);st.rerun()
+                        except (ValueError,PermissionError) as exc:st.error(str(exc))
+            for name in ['matches.xlsx','report.json','quality.json','coverage.json','audio-adjustments.json','preview.mp4','editable-package.zip']:
                 if state['status'] in {'running','queued'} and name in {'preview.mp4','editable-package.zip','audio-adjustments.json'}:continue
                 if state.get('editor_version') and not state.get('verification') and name in {'preview.mp4','editable-package.zip','audio-adjustments.json'}:continue
                 path=manager().file(ident,email,name)
@@ -166,4 +193,15 @@ with tabs[2]:
         'Keep visually suitable selections and resolve narration timing separately','Flag unresolved footage and timing for review',
         'Render an MP4 review draft and a portable editable timeline package'],1):st.write(f'{n}. {label}')
     st.caption('The pilot uses the original Visualizer engine with trained-model deserialization disabled. It does not imply that unavailable videos or sampled-frame decisions have received human approval.')
+
+with tabs[3]:
+    st.subheader('Prepare the media library once')
+    st.write('Create a reusable catalogue of visible actions from the approved videos. New scripts still undergo close visual matching; catalogue descriptions are search candidates, not verified matches.')
+    st.write('This preparation uses existing OpenAI credits. It is separate from the 5–10 minute script-processing target, and completed videos are reused on retry.')
+    prepare_consent=st.checkbox('Prepare the approved library using existing credits. No purchases.',key='prepare-consent')
+    if st.button('Prepare or update action catalogue',disabled=not prepare_consent):
+        try:
+            ident=manager().prepare_catalog(email,settings());st.session_state['job_id']=ident
+            st.success('Preparation queued. Open Project status to follow progress.')
+        except (ValueError,PermissionError) as exc:st.error(str(exc))
 

@@ -3,6 +3,7 @@ from pathlib import Path
 from fractions import Fraction
 from concurrent.futures import ThreadPoolExecutor
 import json
+import hashlib
 import math
 import wave
 import zipfile
@@ -11,8 +12,20 @@ from PIL import Image,ImageDraw,ImageFont
 from .media import execute,retime_audio
 from .timing import allocate_frames
 
+class TimingCoverageError(ValueError):
+    """Selection must find enough relevant context before rendering can start."""
+
+
 def cut_schedule(plans,audios,fps='30000/1001'):
     rate=float(Fraction(fps))
+    if not plans:raise TimingCoverageError('No usable footage was selected.')
+    for plan in plans:
+        voice=audios[plan['step']]['duration']
+        if not math.isfinite(voice) or voice<=0:raise TimingCoverageError('Invalid narration duration.')
+        lengths=[s['end']-s['start'] for s in plan['shots']]
+        if not lengths or any(not math.isfinite(n) or n<=0 for n in lengths):raise TimingCoverageError('Invalid selected footage duration.')
+        if sum(lengths)/voice<.85:
+            raise TimingCoverageError(f"Step {plan['step']} needs more relevant footage or a different selection. Rendering it would create excessive slow motion.")
     # Never compress a long selected procedure into extreme fast-forward.
     # Natural speech is preserved; any additional viewing time is reported.
     durations=[max(audios[p['step']]['duration'],sum(s['end']-s['start'] for s in p['shots'])/1.15) for p in plans]
@@ -72,6 +85,11 @@ def render_actions(plans,audios,library,folder,fps='30000/1001',width=1280,heigh
     paths={s['video_id']:library.video(s['video_id']) for s in shots}
     def prepare(pair):
         i,shot=pair;source=paths[shot['video_id']]
+        output=media/f'shot-{i+1:03}.mp4';marker=output.with_suffix('.sha256')
+        signature=hashlib.sha256(json.dumps([str(source),shot,str(rate),width,height],sort_keys=True).encode()).hexdigest()
+        if output.exists() and marker.exists() and marker.read_text()==signature:
+            import imageio_ffmpeg
+            if imageio_ffmpeg.count_frames_and_secs(str(output))[0]==shot['frames']:return
         args=['-threads','1','-ss',f"{shot['start']:.9f}",'-t',f"{shot['end']-shot['start']:.9f}",'-i',source]
         base=f"setpts=(PTS-STARTPTS)/{shot['video_speed']:.12f},fps={rate},scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,tpad=stop_mode=clone:stop_duration=0.1,trim=end_frame={shot['frames']}"
         if shot['review']:
@@ -87,6 +105,7 @@ def render_actions(plans,audios,library,folder,fps='30000/1001',width=1280,heigh
         args+=['-an','-frames:v',str(shot['frames']),'-r',str(rate),'-c:v','libx264','-threads','1',
                '-preset','veryfast','-crf','21','-pix_fmt','yuv420p',media/f'shot-{i+1:03}.mp4']
         execute(args,media/f'shot-{i+1:03}.log')
+        marker.write_text(signature)
     with ThreadPoolExecutor(max_workers=max(1,min(2,workers))) as pool:list(pool.map(prepare,enumerate(shots)))
     voice_paths=[]
     for plan in plans:

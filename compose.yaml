@@ -1,0 +1,25 @@
+# Optional deployment preparation. No service is purchased or deployed by this file.
+services:
+  web:
+    build: .
+    environment:
+      STUDIO_EXTERNAL_WORKER: "1"
+      STUDIO_JOBS_ROOT: /data/jobs
+    ports:
+      - "127.0.0.1:8501:8501"
+    volumes:
+      - studio-jobs:/data
+      - ${STUDIO_SETTINGS_FILE:?Set the private settings path}:/app/studio/.streamlit/secrets.toml:ro
+      - ${STUDIO_SETTINGS_FILE:?Set the private settings path}:/app/.streamlit/secrets.toml:ro
+    restart: unless-stopped
+  worker:
+    build: .
+    command: ["python", "studio/worker.py"]
+    environment:
+      STUDIO_JOBS_ROOT: /data/jobs
+    volumes:
+      - studio-jobs:/data
+      - ${STUDIO_SETTINGS_FILE:?Set the private settings path}:/run/secrets/studio_settings:ro
+    restart: unless-stopped
+volumes:
+  studio-jobs:

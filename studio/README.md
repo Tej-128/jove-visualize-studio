@@ -12,6 +12,16 @@ An invited-user pilot that accepts a plain numbered script and produces an MP4 r
 6. Render real source footage on the complete narration clock. Review labels identify uncertain visuals and substantial footage-speed changes. Explicitly rejected windows cannot become verified fallback matches.
 7. Deliver MP4, editable timeline with portable media, source in/out records, audio adjustments and a review report. No placeholder-card renderer is used by the default editor.
 
+## Editor version 4 pilot update
+
+Caption retrieval now restricts semantic, lexical and title candidates to videos that actually exist in the configured library **before** ranking. The copied original matcher is unchanged. A reusable script-independent visual action catalogue supplements captions, including videos without captions. Prepare it once from **Library readiness** using existing credits; observations are approximate search candidates and must still pass close visual checks for each new script. Private catalogue files are bound to the current source checksums and stored only in the new app's output folder.
+
+Narration runs alongside matching. The renderer rejects insufficient footage that would create extreme slow motion. `quality.json` separates artifact generation, action coverage, timing and publication approval. Automatic list numbering and table order are retained for normal Word inputs. Reviewers can inspect selected clips by script step and reject a step's shots; a retry reuses saved matching, narration and unchanged rendered clips. No benchmark selection is an editor input. `evaluate_edit.py` compares generated plans against private withheld references after generation; overlap alone is not scientific approval.
+
+Job requests use a SQLite queue with leases, heartbeats, duplicate-request prevention and source-build handover. Provider credentials stay in worker memory, not the queue. Free Community Cloud still shares its process and temporary disk with the UI; this does not provide a production uptime guarantee. `worker.py`, `Dockerfile` and `compose.yaml` prepare an optional separate worker deployment on a persistent shared volume. These files do not buy hosting or deploy an independent worker. Multi-host scheduling, measured load capacity and production infrastructure remain release work.
+
+The 5–10 minute target applies to a fresh short script against a prepared library, and must be measured including fresh matching, narration, selection and rendering. Library ingestion is a separate one-time process. Reports identify reused stages so a rebuild cannot be passed off as a fresh run.
+
 ## Validation and limits
 
 Local automated checks cover candidate-first routing from a plain script, multi-shot selection, uncertainty handling, rejection of invented sources and timestamps, provider-failure fallback, concurrent request accounting, real video rendering, narration frame coverage, pitch preservation, portable assets, invitation and owner checks, and archive/cache validation.

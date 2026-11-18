@@ -1,0 +1,15 @@
+.git
+.env
+**/secrets.toml
+**/secrets*.json
+**/service-account*.json
+**/__pycache__
+**/runtime
+**/*.mp4
+**/*.wav
+**/*.sqlite*
+**/*.npy
+**/*.zip
+**/*.docx
+**/*.xlsx
+**/*.vtt

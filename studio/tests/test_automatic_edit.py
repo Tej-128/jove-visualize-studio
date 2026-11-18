@@ -11,7 +11,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 import imageio_ffmpeg
 from pipeline.automatic_edit import AutomaticEditor,validated_plan,plan_schema
-from pipeline.action_render import cut_schedule,render_actions
+from pipeline.action_render import cut_schedule,render_actions,TimingCoverageError
 from pipeline.media import execute,sample_window
 from pipeline.providers import ModelGateway
 from pipeline.runner import run,write_json
@@ -96,7 +96,7 @@ class AutomaticSelectionTests(unittest.TestCase):
             library=SimpleNamespace(videos={'101':{'sha256':'a'*64,'filename':'101.mp4'}},video=lambda _:Path('source.mp4'),cache=Path(t),
                 caption_context=Mock(return_value=[{'start':1,'end':10,'text':'Actual source transfer procedure.'}]))
             editor=AutomaticEditor(None,library,gateway,t,[step],{1:{'duration':8}},workers=1)
-            with patch('pipeline.automatic_edit.sample_window',return_value=[]):
+            with patch('pipeline.automatic_edit.sample_window',return_value=[]),patch('pipeline.automatic_edit.duration',return_value=12.05):
                 result=editor.fit_context(step,plan,[{'window_id':'d0','video_id':'101','start':0.,'end':12.}])
             self.assertTrue(result['timing_context_verified'])
             self.assertAlmostEqual(result['shots'][0]['end']-result['shots'][0]['start'],8)
@@ -130,7 +130,7 @@ class AutomaticSelectionTests(unittest.TestCase):
             def phase(steps,pools,tier):
                 tiers.append(tier)
                 if tier=='wider_library_visual' and pools.get(1):
-                    editor.plans[1]={'step':1,'text':step.text,'shots':[{'video_id':'202'}],
+                    editor.plans[1]={'step':1,'text':step.text,'shots':[{'video_id':'202','start':1.,'end':8.}],
                         'missing_actions':[],'unobservable_details':[],'needs_review':False,'dense_checked':True}
             editor.inspect_phase=phase
             with patch('pipeline.automatic_edit.Selector.wider_candidates') as caption_fallback:
@@ -239,11 +239,7 @@ class MultiShotMediaTests(unittest.TestCase):
     def test_multi_shot_schedule_keeps_speech_natural_and_reports_extreme_video_speed(self):
         plans=[{'step':1,'text':'Transfer flies.','needs_review':False,'missing_actions':[],'unobservable_details':[],
                 'shots':[dict(video_id='101',start=1.,end=3.,reason='First action'),dict(video_id='101',start=4.,end=6.,reason='Second action')]}]
-        shots,adjustments,total=cut_schedule(plans,{1:{'duration':7}})
-        self.assertEqual(sum(s['frames'] for s in shots),total)
-        self.assertEqual(shots[0]['timeline_end_frame'],shots[1]['timeline_start_frame'])
-        self.assertTrue(all(s['review'] for s in shots))
-        self.assertAlmostEqual(adjustments[0]['tempo'],1,places=2)
+        with self.assertRaises(TimingCoverageError):cut_schedule(plans,{1:{'duration':7}})
 
     def test_real_multi_shot_edit_has_no_cards_complete_audio_and_portable_timeline(self):
         with TemporaryDirectory() as t:

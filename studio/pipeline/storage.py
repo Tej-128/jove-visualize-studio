@@ -47,9 +47,9 @@ class DriveStore:
         if info['mimeType']=='application/vnd.google-apps.document':
             return self.request('GET',f'{BASE}/files/{file_id}/export',params={'mimeType':'text/plain'}).text
         if info['mimeType']=='application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-            from docx import Document
+            from .documents import word_script_text
             r=self.request('GET',f'{BASE}/files/{file_id}',params={'alt':'media','supportsAllDrives':'true'})
-            d=Document(io.BytesIO(r.content));return '\n'.join(p.text for p in d.paragraphs)
+            return word_script_text(r.content)
         raise ValueError('The selected file is not a Google Doc or Word document.')
 
     def upload(self,path,folder_id):
