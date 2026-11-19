@@ -475,7 +475,12 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
     remaining=480-(time.monotonic()-config.get('_PIPELINE_STARTED',started))
     editor=AutomaticEditor(index,library,gateway,folder/'automatic',steps,audio_map,progress=progress,
         seconds=max(1,min(int(config.get('VISUAL_REVIEW_SECONDS',300)),remaining)),workers=int(config.get('VISUAL_WORKERS',3)),action_catalog=catalog)
-    plans=editor.run(json.loads((folder/'matches.json').read_text()))
+    if config.get('HOSTED_SHORTLIST'):
+        from .sheets import read_candidates
+        rows = read_candidates((folder/'matches.xlsx').read_bytes())
+        plans = editor.run_shortlist(rows)
+    else:
+        plans=editor.run(json.loads((folder/'matches.json').read_text()))
     missing=[s.number for s in steps if s.number not in {p['step'] for p in plans}]
     issues=[{'step':p['step'],'reason':'; '.join(p['missing_actions']+p['unobservable_details']) or 'Illustrative footage requires review.'}
             for p in plans if p['needs_review']]
@@ -487,7 +492,8 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
             'stage_seconds':dict(config.get('_STAGE_SECONDS',{})),
             'attempts':editor.attempts,'model_requests':gateway.prior_calls+gateway.calls,
             'visual_seconds':round(time.monotonic()-started,2),'input_contract':'Plain script only. No reference timestamps or benchmark selections were supplied to this editor.',
-            'review_method':'Suggested ranges, suggested videos, then wider retrieval and visual discovery. Retained uncertainty is explicit.'}
+            'review_method':('Sheet-only visual review with verified live action and narration-aligned cuts.'
+                             if config.get('HOSTED_SHORTLIST') else 'Suggested ranges followed by wider retrieval and visual discovery.')}
     write_json(folder/'report.json',report);store.upload(folder/'report.json',remote)
     for plan in plans:
         if (not plan.get('scientific_audit_checked') or not plan.get('dense_checked')
@@ -496,7 +502,7 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
             issues.append({'step':plan['step'],'reason':'Live experimental footage demonstrating the action still needs verification.'})
     if plans and not issues:
         try:
-            scheduled, _, _ = cut_schedule(plans, audio_map)
+            scheduled, _, _ = cut_schedule(plans, audio_map, plugin_cuts=bool(config.get('HOSTED_SHORTLIST')))
             for number in sorted({shot['step'] for shot in scheduled if shot['review']}):
                 issues.append({'step':number,'reason':'The final cut exceeds the allowed playback speed or narration pause.'})
         except TimingCoverageError as exc:
@@ -510,7 +516,7 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
                    detail='The edit needs verified live footage and natural timing for every step. See the saved review reasons.')
         return
     checkpoint('assembly',detail=f'Rendering {len(plans)} script steps using real source footage. Narration is retained; review flags stay visible.',issues=issues)
-    result=render_actions(plans,audio_map,library,folder)
+    result=render_actions(plans,audio_map,library,folder,plugin_cuts=bool(config.get('HOSTED_SHORTLIST')))
     for row in json.loads((folder/'audio-adjustments.json').read_text()):
         if not .85<=row['video_speed']<=1.151:
             issues.append({'step':row['step'],'reason':f"Footage plays at {row['video_speed']:.2f}x to retain the complete selected action and natural narration. Review pacing."})

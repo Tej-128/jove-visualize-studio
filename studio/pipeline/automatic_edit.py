@@ -299,6 +299,37 @@ class AutomaticEditor:
         result=screen_video(vid,path,item['sha256'],self.steps,self.gateway,self.library.cache/'full-overviews',rules=DISCOVERY_RULES)
         self.catalogs[vid]=result['candidates'];return result['candidates']
 
+    def run_shortlist(self, rows):
+        allowed = {r['video_id'] for r in rows}
+        if not allowed or not allowed.issubset(self.library.videos):
+            raise ValueError('A suggested video is missing or the sheet is empty.')
+        # Previously saved selections may have come from a broader search.
+        self.plans.clear()
+        self.backups.clear()
+        pools = {step.number: [] for step in self.steps}
+        for row in rows:
+            pools[row['step']].append(dict(row, caption=row.get('caption','')))
+        self.inspect_phase(self.steps, pools, 'suggested_timestamp')
+        if self.action_catalog is not None:
+            pending = [s for s in self.steps if s.number not in self.plans]
+            groups = {s.number: self.action_catalog.search(s.text, sorted(allowed)) for s in pending}
+            self.inspect_phase(pending, groups, 'shortlisted_action_catalog')
+        for vid in sorted(allowed):
+            pending = [step for step in self.steps if step.number not in self.plans]
+            if not pending or time.monotonic() >= self.deadline:
+                break
+            try:
+                candidates = self.catalog(vid)
+            except (ValueError, RuntimeError, VisionBudgetExceeded) as exc:
+                for s in pending:
+                    self.attempts[s.number].append({'video_id':vid,'status':'shortlisted_video_unavailable','exception':type(exc).__name__})
+                continue
+            groups = {s.number: [c for c in candidates if c['step']==s.number and str(c['video_id'])==vid]
+                      for s in pending}
+            self.inspect_phase(pending, groups, 'shortlisted_video')
+        return [self.plans[s.number] for s in self.steps if s.number in self.plans and
+                all(str(shot['video_id']) in allowed for shot in self.plans[s.number]['shots'])]
+
     def run(self,matches):
         candidates=suggested_candidates(matches,set(self.library.videos))
         pools={s.number:[c for c in candidates if c['step']==s.number] for s in self.steps}

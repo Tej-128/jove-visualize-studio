@@ -16,7 +16,7 @@ class TimingCoverageError(ValueError):
     """Selection must find enough relevant context before rendering can start."""
 
 
-def cut_schedule(plans,audios,fps='30000/1001'):
+def cut_schedule(plans,audios,fps='30000/1001',plugin_cuts=False):
     rate=float(Fraction(fps))
     if not plans:raise TimingCoverageError('No usable footage was selected.')
     for plan in plans:
@@ -29,6 +29,8 @@ def cut_schedule(plans,audios,fps='30000/1001'):
     # Never compress a long selected procedure into extreme fast-forward.
     # Natural speech is preserved; any additional viewing time is reported.
     durations=[max(audios[p['step']]['duration'],sum(s['end']-s['start'] for s in p['shots'])/1.15) for p in plans]
+    if plugin_cuts:
+        durations = [audios[p['step']]['duration'] for p in plans]
     boundaries=allocate_frames(durations,fps);result=[];adjustments=[]
     for plan,(begin,end) in zip(plans,boundaries):
         total=sum(s['end']-s['start'] for s in plan['shots'])
@@ -52,6 +54,17 @@ def cut_schedule(plans,audios,fps='30000/1001'):
             'timeline_seconds':(end-begin)/rate,'tempo':audio_tempo,'additional_viewing_seconds':silence,
             'source_video_seconds':total,'video_speed':total/((end-begin)/rate),
             'review':any(s['review'] for s in result if s['step']==plan['step'])})
+    if plugin_cuts:
+        for i, shot in enumerate(result):
+            section = shot.get('section', shot['step'])
+            left = i > 0 and section != result[i-1].get('section',result[i-1]['step'])
+            right = i+1 < len(result) and section != result[i+1].get('section',result[i+1]['step'])
+            shot.update(left_handle=4*left, right_handle=4*right)
+            length = shot['frames'] + shot['left_handle'] + shot['right_handle']
+            shot['encoded_frames'] = length
+            shot['video_speed'] = (shot['end']-shot['start'])*rate/length
+            if shot['frames'] <= shot['left_handle']+shot['right_handle'] or not .85 <= shot['video_speed'] <= 1.15:
+                raise TimingCoverageError(f"Step {shot['step']} needs a different verified range for the transition.")
     return result,adjustments,boundaries[-1][1]
 
 def build_cut_timeline(folder,shots,frames,fps,width,height):
@@ -70,21 +83,35 @@ def build_cut_timeline(folder,shots,frames,fps,width,height):
     voice=ET.SubElement(root,'playlist',id='audio');prop(voice,'shotcut:name','A1 Narration');prop(voice,'shotcut:trackAudio',1)
     ET.SubElement(voice,'entry',producer='narration',**{'in':'0','out':str(frames-1)})
     video=ET.SubElement(root,'playlist',id='video');prop(video,'shotcut:name','V1 Footage')
-    for i,shot in enumerate(shots):ET.SubElement(video,'entry',producer=f'clip{i}',**{'in':'0','out':str(shot['frames']-1)})
+    for i,shot in enumerate(shots):
+        end = shot.get('encoded_frames',shot['frames'])
+        overlap = 2*shot.get('right_handle',0)
+        ET.SubElement(video,'entry',producer=f'clip{i}',**{'in':str(2*shot.get('left_handle',0)),'out':str(end-overlap-1)})
+        if overlap:
+            dissolve=ET.Element('tractor',id=f'dissolve{i}',out='7')
+            root.insert(list(root).index(video),dissolve)
+            ET.SubElement(dissolve,'track',producer=f'clip{i}',**{'in':str(end-8),'out':str(end-1)})
+            ET.SubElement(dissolve,'track',producer=f'clip{i+1}',**{'in':'0','out':'7'})
+            transition=ET.SubElement(dissolve,'transition',out='7')
+            for k,v in {'mlt_service':'luma','a_track':0,'b_track':1}.items():prop(transition,k,v)
+            ET.SubElement(video,'entry',producer=f'dissolve{i}',**{'in':'0','out':'7'})
     tractor=ET.SubElement(root,'tractor',id='tractor',shotcut='1',**{'in':'0','out':str(frames-1)})
     ET.SubElement(tractor,'track',producer='video',hide='audio');ET.SubElement(tractor,'track',producer='audio',hide='video')
     mix=ET.SubElement(tractor,'transition',**{'in':'0','out':str(frames-1)})
     for k,v in {'mlt_service':'mix','a_track':0,'b_track':1,'always_active':1,'sum':1}.items():prop(mix,k,v)
     ET.indent(root);ET.ElementTree(root).write(folder/'editable.mlt',encoding='utf-8',xml_declaration=True)
 
-def render_actions(plans,audios,library,folder,fps='30000/1001',width=1280,height=720,workers=2):
+def render_actions(plans,audios,library,folder,fps='30000/1001',width=1280,height=720,workers=2,plugin_cuts=False):
     folder=Path(folder);media=folder/'media';media.mkdir(parents=True,exist_ok=True)
     if not plans:raise ValueError('No usable source footage is available; unrelated footage will not be invented.')
-    shots,adjustments,frames=cut_schedule(plans,audios,fps);rate=Fraction(fps)
+    shots,adjustments,frames=cut_schedule(plans,audios,fps,plugin_cuts);rate=Fraction(fps)
+    if plugin_cuts and any(s['review'] for s in shots):
+        raise TimingCoverageError('A selected shot still needs review.')
     # Resolve and validate source paths before concurrent encoders read them.
     paths={s['video_id']:library.video(s['video_id']) for s in shots}
     def prepare(pair):
         i,shot=pair;source=paths[shot['video_id']]
+        shot = {**shot,'frames':shot.get('encoded_frames',shot['frames'])}
         output=media/f'shot-{i+1:03}.mp4';marker=output.with_suffix('.sha256')
         signature=hashlib.sha256(json.dumps([str(source),shot,str(rate),width,height],sort_keys=True).encode()).hexdigest()
         if output.exists() and marker.exists() and marker.read_text()==signature:
@@ -118,7 +145,22 @@ def render_actions(plans,audios,library,folder,fps='30000/1001',width=1280,heigh
         for path in voice_paths:
             with wave.open(str(path),'rb') as voice:output.writeframes(voice.readframes(voice.getnframes()))
     concat=folder/'segments.txt';concat.write_text(''.join(f"file 'media/shot-{i+1:03}.mp4'\n" for i in range(len(shots))))
-    execute(['-f','concat','-safe','1','-i',concat,'-i',folder/'narration.wav','-map','0:v:0','-map','1:a:0',
+    if any(s.get('left_handle') for s in shots):
+        args=['-filter_complex_threads','1']
+        filters=[]
+        for i in range(len(shots)):
+            args+=['-threads','1','-i',media/f'shot-{i+1:03}.mp4']
+            filters.append(f'[{i}:v]setpts=PTS-STARTPTS,fps={rate}[v{i}]')
+        previous='v0'
+        for i,s in enumerate(shots[1:],1):
+            operation=(f"xfade=duration={8/float(rate):.12f}:offset={(s['timeline_start_frame']-4)/float(rate):.12f}"
+                       if s['left_handle'] else 'concat=n=2:v=1:a=0')
+            filters.append(f'[{previous}][v{i}]{operation},fps={rate}[j{i}]')
+            previous=f'j{i}'
+        execute(args+['-i',folder/'narration.wav','-filter_complex',';'.join(filters+[f'[{previous}]tpad=stop_mode=clone:stop=1[final]']),'-map','[final]',
+            '-map',f'{len(shots)}:a','-r',str(rate),'-frames:v',str(frames),'-c:v','libx264','-threads','2',
+            '-pix_fmt','yuv420p','-crf','18','-c:a','aac','-movflags','+faststart',folder/'preview.mp4'],folder/'render.log')
+    else:execute(['-f','concat','-safe','1','-i',concat,'-i',folder/'narration.wav','-map','0:v:0','-map','1:a:0',
              '-c:v','copy','-c:a','aac','-b:a','192k','-movflags','+faststart',folder/'preview.mp4'],folder/'render.log')
     # Check the actual artifact, not just the intended filter graph.
     import imageio_ffmpeg
@@ -126,7 +168,7 @@ def render_actions(plans,audios,library,folder,fps='30000/1001',width=1280,heigh
     if actual!=frames:raise ValueError(f'Rendered frame count mismatch: expected {frames}, received {actual}')
     build_cut_timeline(folder,shots,frames,rate,width,height)
     plan={'version':1,'fps':fps,'frames':frames,'shots':shots,'steps':plans,'audio_adjustments':adjustments,
-          'transition_policy':'Cuts within an experiment. No automatic dissolve between every script step.'}
+          'transition_policy':'Centered eight-frame dissolve at section changes' if plugin_cuts else 'Straight cuts'}
     (folder/'edit_plan.json').write_text(json.dumps(plan,indent=2),encoding='utf-8')
     (folder/'audio-adjustments.json').write_text(json.dumps(adjustments,indent=2),encoding='utf-8')
     with zipfile.ZipFile(folder/'editable-package.zip','w',compression=zipfile.ZIP_STORED) as archive:
@@ -134,4 +176,6 @@ def render_actions(plans,audios,library,folder,fps='30000/1001',width=1280,heigh
             archive.write(path,path.relative_to(folder).as_posix())
     return {'frames':frames,'fps':fps,'duration':frames/float(rate),'shots':len(shots),'steps':len(plans),
             'review_only':any(s['review'] for s in shots),'placeholder_steps':[],
-            'footage_steps':len(plans),'verified_steps':sum(not p['needs_review'] for p in plans),'dissolves':0}
+            'footage_steps':len(plans),'verified_steps':sum(not p['needs_review'] for p in plans),'dissolves':sum(bool(s.get('left_handle')) for s in shots)}
+
+

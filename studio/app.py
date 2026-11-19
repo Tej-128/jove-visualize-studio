@@ -57,7 +57,7 @@ def settings():
     cfg={k:dict(st.secrets[k]) if k=='google_service_account' else st.secrets[k] for k in keys}
     cfg.update(TEXT_MODEL=st.secrets.get('TEXT_MODEL','gpt-5-mini'),VISION_MODEL=st.secrets.get('VISION_MODEL','gpt-4.1-mini'),
                MAX_VISION_CALLS=int(st.secrets.get('MAX_VISION_CALLS',80)),ENGINE_BUILD=runtime.revision)
-    cfg['SHORTLIST_PLUGIN'] = True
+    cfg['HOSTED_SHORTLIST'] = True
     return cfg
 
 with st.sidebar:

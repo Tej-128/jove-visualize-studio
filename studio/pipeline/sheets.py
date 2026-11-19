@@ -35,6 +35,7 @@ def read_candidates(data:bytes):
                 if end<=start:raise ValueError('Candidate ends before it starts')
                 result.append({'step':int(item['Step']),'text':str(item.get('Script Step') or ''),
                     'video_id':str(item['Journal ID']).removesuffix('.0'),'start':start,'end':end,
+                    'caption':str(item.get('Matching CC Text') or ''),
                     'feedback':str(item.get('Feedback Notes') or ''),'origin':'reference_workbook',
                     'original_start':item.get('Start'),'original_end':item.get('End')})
             return result
