@@ -348,6 +348,14 @@ def run(folder,owner,text,config):
             else:config['_REUSED_STAGES'].append('narration-'+str(steps[i].number))
             audios[i]={**info,'path':str(path)}
             checkpoint('narration',completed_audio_steps=done,detail=f'Narration ready for {done} of {len(steps)} steps.')
+        if config.get('SHORTLIST_PLUGIN'):
+            from .plugin_project import package_project
+            checkpoint('plugin_project', detail='Preparing shortlisted footage for the Premiere plugin.')
+            bundle = package_project(folder, steps, audios, library)
+            store.upload(bundle, remote)
+            checkpoint('plugin_ready', 'complete', plugin_project_id=store.upload_ids[(remote, bundle.name)],
+                       detail='The shortlisted project is ready for the desktop plugin.')
+            return
         # Whole-library screening is an explicit recovery path. New scripts must
         # finish suggested timestamps and suggested videos before widening.
         if config.get('AUTOMATIC_EDITOR',True):
@@ -446,7 +454,7 @@ def run(folder,owner,text,config):
 
 def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store,remote):
     from .automatic_edit import AutomaticEditor,VERSION
-    from .action_render import render_actions
+    from .action_render import render_actions, cut_schedule, TimingCoverageError
     from .action_catalog import open_catalog
     from .editorial import quality_report
     started=time.monotonic()
@@ -481,11 +489,25 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
             'visual_seconds':round(time.monotonic()-started,2),'input_contract':'Plain script only. No reference timestamps or benchmark selections were supplied to this editor.',
             'review_method':'Suggested ranges, suggested videos, then wider retrieval and visual discovery. Retained uncertainty is explicit.'}
     write_json(folder/'report.json',report);store.upload(folder/'report.json',remote)
-    if not plans:
+    for plan in plans:
+        if (not plan.get('scientific_audit_checked') or not plan.get('dense_checked')
+                or any(shot.get('medium') != 'experimental_footage' or shot.get('evidence') != 'demonstrated'
+                       for shot in plan['shots'])):
+            issues.append({'step':plan['step'],'reason':'Live experimental footage demonstrating the action still needs verification.'})
+    if plans and not issues:
+        try:
+            scheduled, _, _ = cut_schedule(plans, audio_map)
+            for number in sorted({shot['step'] for shot in scheduled if shot['review']}):
+                issues.append({'step':number,'reason':'The final cut exceeds the allowed playback speed or narration pause.'})
+        except TimingCoverageError as exc:
+            issues.append({'reason':str(exc)})
+    if not plans or issues:
+        report['issues'] = issues
+        write_json(folder/'report.json',report);store.upload(folder/'report.json',remote)
         quality=quality_report(steps,plans,[],time.monotonic()-config.get('_PIPELINE_STARTED',started))
         write_json(folder/'quality.json',quality);store.upload(folder/'quality.json',remote)
         checkpoint('review','needs_review',issues=issues,verification=None,
-                   detail='No selection passed the footage and timing gates. Matching, narration and evidence are saved. No unrelated or excessively slowed footage was rendered.')
+                   detail='The edit needs verified live footage and natural timing for every step. See the saved review reasons.')
         return
     checkpoint('assembly',detail=f'Rendering {len(plans)} script steps using real source footage. Narration is retained; review flags stay visible.',issues=issues)
     result=render_actions(plans,audio_map,library,folder)

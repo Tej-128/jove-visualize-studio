@@ -37,8 +37,8 @@ def apply_audit(plan,answer,step,source_text):
     result=copy.deepcopy(plan);units=action_units(step.text);covered=set()
     for i,shot in enumerate(result['shots']):
         row=lookup[str(i)]
-        if row.get('boundary_suitable') is not True or row.get('medium') in {'title_card','mixed','unknown'}:return None
-        if row.get('medium') not in {'experimental_footage','animation','diagram'}:return None
+        if row.get('boundary_suitable') is not True or row.get('medium') != 'experimental_footage':
+            return None
         actions=row.get('actions',[])
         if not isinstance(actions,list):return None
         acceptable=[];direct=[]

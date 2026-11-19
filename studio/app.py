@@ -57,6 +57,7 @@ def settings():
     cfg={k:dict(st.secrets[k]) if k=='google_service_account' else st.secrets[k] for k in keys}
     cfg.update(TEXT_MODEL=st.secrets.get('TEXT_MODEL','gpt-5-mini'),VISION_MODEL=st.secrets.get('VISION_MODEL','gpt-4.1-mini'),
                MAX_VISION_CALLS=int(st.secrets.get('MAX_VISION_CALLS',80)),ENGINE_BUILD=runtime.revision)
+    cfg['SHORTLIST_PLUGIN'] = True
     return cfg
 
 with st.sidebar:
@@ -125,6 +126,11 @@ with tabs[1]:
             if state['stage']=='review' and not state.get('verification'):st.write('Visual review is complete. Resolve the flagged steps before rendering.')
             elif state.get('detail'):st.write(state['detail'])
             st.caption('Last reported activity: '+str(round(time.time()-state.get('updated',state.get('created',0))))+' seconds ago')
+            if state['stage']=='plugin_ready':
+                st.link_button('Download shortlisted Premiere project',
+                               'https://drive.google.com/file/d/'+state['plugin_project_id']+'/view')
+                st.write('Extract the project and open it with Script to Premiere Shortlist for footage review and editing.')
+                return
             if state.get('kind')=='catalog':
                 if state.get('catalog_total'):st.progress(min(1.,state.get('catalog_completed',0)/state['catalog_total']))
                 if state.get('error'):st.error(state['error'])

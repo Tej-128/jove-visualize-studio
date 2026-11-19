@@ -36,7 +36,7 @@ class ScientificAuditTests(unittest.TestCase):
     def test_animation_is_never_upgraded_to_demonstrated_experimental_footage(self):
         audit=answer();audit['shots'][0]['medium']='animation'
         result=apply_audit(plan(),audit,SimpleNamespace(text='Freeze flies.'),'')
-        self.assertEqual(result['shots'][0]['evidence'],'illustrative');self.assertTrue(result['needs_review'])
+        self.assertIsNone(result)
 
     def test_unrelated_section_title_or_mixed_scene_is_rejected(self):
         for change in [{'boundary_suitable':False},{'medium':'mixed'},{'medium':'title_card'}]:

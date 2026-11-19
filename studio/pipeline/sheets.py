@@ -28,6 +28,7 @@ def read_candidates(data:bytes):
             for row in rows:
                 item=dict(zip(names,row))
                 if item.get('Step') is None:continue
+                if not str(item.get('Journal ID') or '').strip():continue
                 refined=str(item.get('Exact time stamps') or '').strip()
                 bounds=re.split(r'\s*[-–—]\s*',refined) if refined else []
                 start,end=(seconds(x) for x in bounds) if len(bounds)==2 else (seconds(item['Start']),seconds(item['End']))
