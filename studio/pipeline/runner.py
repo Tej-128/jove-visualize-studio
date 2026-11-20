@@ -84,7 +84,9 @@ class Jobs:
             ident=uuid.uuid4().hex;folder=self.root/ident;folder.mkdir()
             (folder/'input.txt').write_text(text,encoding='utf-8')
             if reference:(folder/'reference.xlsx').write_bytes(reference)
-            write_json(folder/'state.json',{'id':ident,'owner':owner,'status':'queued','stage':'queued','created':time.time()})
+            write_json(folder/'state.json',{'id':ident,'owner':owner,'kind':'video','status':'queued','stage':'queued',
+                'created':time.time(),'allow_ai_illustrations':bool(config.get('ALLOW_AI_ILLUSTRATIONS',False)),
+                'source_policy':'jove_first_optional_illustrations' if config.get('ALLOW_AI_ILLUSTRATIONS',False) else 'jove_only'})
             if self.worker_config is not None:
                 queued=self.queue.enqueue(ident,owner,text,config)
                 if queued!=ident:
@@ -181,6 +183,9 @@ class Jobs:
             if any(not f.done() for f in self.futures.values()):raise ValueError('Wait for the current project to finish.')
             folder=self.root/ident
             text=(folder/'input.txt').read_text(encoding='utf-8') if state.get('kind')!='catalog' else 'library-actions:'+config['LIBRARY_FOLDER_ID']
+            if state.get('kind')!='catalog':
+                # The original user choice is immutable for this job, including on recovery.
+                config={**config,'ALLOW_AI_ILLUSTRATIONS':bool(state.get('allow_ai_illustrations',False))}
             state.update(status='queued',stage='recovery',error=None,issues=[],verification=None,
                          detail='Rebuilding from the saved script, matches and narration.',updated=time.time())
             write_json(folder/'state.json',state)
@@ -486,6 +491,7 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
             for p in plans if p['needs_review']]
     issues.extend({'step':number,'reason':'No usable related footage was retained. This step is omitted from the partial review edit.'} for number in missing)
     report={'editor_version':VERSION,'selected':plans,'issues':issues,'omitted_steps':missing,
+             'source_policy':'jove_first_optional_illustrations' if config.get('ALLOW_AI_ILLUSTRATIONS',False) else 'jove_only',
             'catalog_ready':bool(catalog is not None and catalog.ready),
             'catalog_sources':len(catalog.data['videos']) if catalog is not None else 0,
             'reused_stages':config.get('_REUSED_STAGES',[]),
