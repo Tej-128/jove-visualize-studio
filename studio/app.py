@@ -77,11 +77,17 @@ with tabs[0]:
     if not profiles:
         st.warning('Configure at least one approved voice profile in secure settings.');st.stop()
     profile=st.selectbox('Approved voice profile',list(profiles))
+    allow_illustrations=st.checkbox(
+        'Allow AI-generated scientific illustrations ONLY if suitable JoVE footage is unavailable',
+        value=False,key='allow_illustrations',
+        help='OFF by default. JoVE videos are always searched first. Generated illustrations are explicitly labelled and never treated as experimental footage or scientific proof.')
+    if allow_illustrations:st.caption('Opt-in experimental fallback: generated illustrations are review-only and incur additional image-generation API usage. No fabricated experimental recordings.')
+    else:st.caption('JoVE footage only. No AI-generated images or animations will be used.')
     st.caption('Only the script is required. The app finds footage, generates narration and produces a review edit. Any uncertain visuals or substantial timing changes are flagged.')
     consent=st.checkbox('Generate using the configured existing credits and approved private processing services.')
     if st.button('Generate video draft',type='primary',disabled=not consent):
         try:
-            config=settings();config['voice']=dict(profiles[profile])
+            config=settings();config['voice']=dict(profiles[profile]);config['ALLOW_AI_ILLUSTRATIONS']=bool(allow_illustrations)
             if script_url:
                 match=re.fullmatch(r'https://(?:docs\.google\.com/document/d/|drive\.google\.com/file/d/)([A-Za-z0-9_-]+)(?:/[^\s]*)?',script_url.strip())
                 if not match:raise ValueError('Use a Google Docs or Drive file link.')
