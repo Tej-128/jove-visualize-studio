@@ -108,7 +108,19 @@ def render_actions(plans,audios,library,folder,fps='30000/1001',width=1280,heigh
     if plugin_cuts and any(s['review'] for s in shots):
         raise TimingCoverageError('A selected shot still needs review.')
     # Resolve and validate source paths before concurrent encoders read them.
-    paths={s['video_id']:library.video(s['video_id']) for s in shots}
+    paths={}
+    for shot in shots:
+        vid=shot["video_id"]
+        if shot.get("medium") == "generated_illustration":
+            # Accept only explicitly generated assets underneath this job folder.
+            # Synthetic clips must never be resolved from the JoVE media library.
+            source=Path(shot["path"]).resolve()
+            trusted=(folder/"illustrations").resolve()
+            if not vid.startswith("ai-illustration-step-") or not source.is_relative_to(trusted) or not source.is_file():
+                raise ValueError("Untrusted illustration asset path.")
+            paths[vid]=source
+        else:
+            paths[vid]=library.video(vid)
     def prepare(pair):
         i,shot=pair;source=paths[shot['video_id']]
         shot = {**shot,'frames':shot.get('encoded_frames',shot['frames'])}
