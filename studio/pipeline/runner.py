@@ -84,7 +84,9 @@ class Jobs:
             ident=uuid.uuid4().hex;folder=self.root/ident;folder.mkdir()
             (folder/'input.txt').write_text(text,encoding='utf-8')
             if reference:(folder/'reference.xlsx').write_bytes(reference)
-            write_json(folder/'state.json',{'id':ident,'owner':owner,'status':'queued','stage':'queued','created':time.time()})
+            write_json(folder/'state.json',{'id':ident,'owner':owner,'kind':'video','status':'queued','stage':'queued',
+                'created':time.time(),'allow_ai_illustrations':bool(config.get('ALLOW_AI_ILLUSTRATIONS',False)),
+                'source_policy':'jove_first_optional_illustrations' if config.get('ALLOW_AI_ILLUSTRATIONS',False) else 'jove_only'})
             if self.worker_config is not None:
                 queued=self.queue.enqueue(ident,owner,text,config)
                 if queued!=ident:
@@ -181,6 +183,9 @@ class Jobs:
             if any(not f.done() for f in self.futures.values()):raise ValueError('Wait for the current project to finish.')
             folder=self.root/ident
             text=(folder/'input.txt').read_text(encoding='utf-8') if state.get('kind')!='catalog' else 'library-actions:'+config['LIBRARY_FOLDER_ID']
+            if state.get('kind')!='catalog':
+                # The original user choice is immutable for this job, including on recovery.
+                config={**config,'ALLOW_AI_ILLUSTRATIONS':bool(state.get('allow_ai_illustrations',False))}
             state.update(status='queued',stage='recovery',error=None,issues=[],verification=None,
                          detail='Rebuilding from the saved script, matches and narration.',updated=time.time())
             write_json(folder/'state.json',state)
@@ -481,11 +486,43 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
         plans = editor.run_shortlist(rows)
     else:
         plans=editor.run(json.loads((folder/'matches.json').read_text()))
+    illustration_errors={}
+    if config.get('ALLOW_AI_ILLUSTRATIONS') is True:
+        # Opt-in only, AFTER genuine JoVE matching and footage verification.
+        # Illustrations are educational diagrams, never experimental evidence.
+        from .illustrations import create_illustration_plan
+        for step in steps:
+            if step.number in {p['step'] for p in plans}:continue
+            try:
+                plans.append(create_illustration_plan(step,audio_map[step.number],folder,config))
+            except Exception as exc:
+                illustration_errors[step.number]=type(exc).__name__
+        # Short source clips cannot be distorted into long scientific actions.
+        # In opted-in draft mode, use a labelled diagram for an invalid cut.
+        replacement=[]
+        for plan in plans:
+            try:
+                cut_schedule([plan],audio_map,plugin_cuts=False)
+                replacement.append(plan)
+            except (TimingCoverageError,ValueError) as exc:
+                if plan.get('source_provenance'):
+                    illustration_errors[plan['step']]=type(exc).__name__
+                    continue
+                step=next(s for s in steps if s.number==plan['step'])
+                try:
+                    replacement.append(create_illustration_plan(step,audio_map[step.number],folder,config))
+                except Exception as image_exc:
+                    illustration_errors[step.number]=type(image_exc).__name__
+        plans=replacement
+        plans.sort(key=lambda p:next(i for i,s in enumerate(steps) if s.number==p['step']))
     missing=[s.number for s in steps if s.number not in {p['step'] for p in plans}]
     issues=[{'step':p['step'],'reason':'; '.join(p['missing_actions']+p['unobservable_details']) or 'Illustrative footage requires review.'}
             for p in plans if p['needs_review']]
-    issues.extend({'step':number,'reason':'No usable related footage was retained. This step is omitted from the partial review edit.'} for number in missing)
+    issues.extend({'step':number,'reason':'No usable JoVE footage. Opt-in illustration generation failed ('+illustration_errors[number]+').'
+                   if number in illustration_errors else 'No usable related footage was retained. This step is omitted from the partial review edit.'}
+                  for number in missing)
     report={'editor_version':VERSION,'selected':plans,'issues':issues,'omitted_steps':missing,
+             'source_policy':'jove_first_optional_illustrations' if config.get('ALLOW_AI_ILLUSTRATIONS',False) else 'jove_only',
             'catalog_ready':bool(catalog is not None and catalog.ready),
             'catalog_sources':len(catalog.data['videos']) if catalog is not None else 0,
             'reused_stages':config.get('_REUSED_STAGES',[]),
@@ -500,14 +537,17 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
                 or any(shot.get('medium') != 'experimental_footage' or shot.get('evidence') != 'demonstrated'
                        for shot in plan['shots'])):
             issues.append({'step':plan['step'],'reason':'Live experimental footage demonstrating the action still needs verification.'})
-    if plans and not issues:
+    opt_in_draft=bool(config.get('ALLOW_AI_ILLUSTRATIONS') is True)
+    timing_error=None
+    if plans and (not issues or opt_in_draft):
         try:
-            scheduled, _, _ = cut_schedule(plans, audio_map, plugin_cuts=bool(config.get('HOSTED_SHORTLIST')))
+            scheduled, _, _ = cut_schedule(plans, audio_map, plugin_cuts=bool(config.get('HOSTED_SHORTLIST') and not opt_in_draft))
             for number in sorted({shot['step'] for shot in scheduled if shot['review']}):
                 issues.append({'step':number,'reason':'The final cut exceeds the allowed playback speed or narration pause.'})
-        except TimingCoverageError as exc:
-            issues.append({'reason':str(exc)})
-    if not plans or issues:
+        except (TimingCoverageError,ValueError) as exc:
+            timing_error=str(exc)
+            issues.append({'reason':timing_error})
+    if not plans or missing or timing_error or (issues and not opt_in_draft):
         report['issues'] = issues
         write_json(folder/'report.json',report);store.upload(folder/'report.json',remote)
         quality=quality_report(steps,plans,[],time.monotonic()-config.get('_PIPELINE_STARTED',started))
@@ -516,23 +556,25 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
                    detail='The edit needs verified live footage and natural timing for every step. See the saved review reasons.')
         return
     checkpoint('assembly',detail=f'Rendering {len(plans)} script steps using real source footage. Narration is retained; review flags stay visible.',issues=issues)
-    result=render_actions(plans,audio_map,library,folder,plugin_cuts=bool(config.get('HOSTED_SHORTLIST')))
+    result=render_actions(plans,audio_map,library,folder,plugin_cuts=bool(config.get('HOSTED_SHORTLIST') and not opt_in_draft))
     for row in json.loads((folder/'audio-adjustments.json').read_text()):
         if not .85<=row['video_speed']<=1.151:
             issues.append({'step':row['step'],'reason':f"Footage plays at {row['video_speed']:.2f}x to retain the complete selected action and natural narration. Review pacing."})
         if row.get('additional_viewing_seconds',0)>.3:
             issues.append({'step':row['step'],'reason':f"The selected action requires {row['additional_viewing_seconds']:.1f} extra seconds of viewing after narration; review pacing or select a more concise action."})
     result['review_only']=bool(issues);result['omitted_steps']=missing
+    result['generated_illustration_steps']=[p['step'] for p in plans if p.get('source_provenance')]
     elapsed=round(time.monotonic()-config.get('_PIPELINE_STARTED',started),2)
     quality=quality_report(steps,plans,json.loads((folder/'audio-adjustments.json').read_text()),elapsed)
     result['review_only']=bool(issues) or not quality['automated_checks_passed']
     write_json(folder/'quality.json',quality)
-    report.update(issues=issues,verification=result,quality=quality,processing_seconds=elapsed,draft_contains_placeholders=False)
+    report.update(issues=issues,verification=result,quality=quality,processing_seconds=elapsed,draft_contains_placeholders=False,
+                  generated_illustration_steps=result['generated_illustration_steps'])
     write_json(folder/'report.json',report)
     for name in ['report.json','preview.mp4','editable-package.zip','edit_plan.json','audio-adjustments.json','quality.json']:
         store.upload(folder/name,remote)
     checkpoint('review' if result['review_only'] else 'complete','needs_review' if result['review_only'] else 'complete',
-               detail=f"MP4 and editable timeline rendered with real footage for {len(plans)} of {len(steps)} steps. No placeholder cards. Review the listed uncertainties before production use.",
+               detail=f"Review MP4 and editable timeline rendered for {len(plans)} of {len(steps)} steps. JoVE footage prioritized. {len(result['generated_illustration_steps'])} explicitly labelled illustrations. Scientific approval not implied.",
                issues=issues,verification=result,timing_attempted=True,full_subset_finished=True,completed_visual_steps=len(steps))
 
 
