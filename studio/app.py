@@ -56,7 +56,8 @@ def settings():
     keys=['OPENAI_API_KEY','ELEVENLABS_API_KEY','google_service_account','LIBRARY_FOLDER_ID','OUTPUT_FOLDER_ID']
     cfg={k:dict(st.secrets[k]) if k=='google_service_account' else st.secrets[k] for k in keys}
     cfg.update(TEXT_MODEL=st.secrets.get('TEXT_MODEL','gpt-5-mini'),VISION_MODEL=st.secrets.get('VISION_MODEL','gpt-4.1-mini'),
-               MAX_VISION_CALLS=int(st.secrets.get('MAX_VISION_CALLS',80)),ENGINE_BUILD=runtime.revision)
+               MAX_VISION_CALLS=int(st.secrets.get('MAX_VISION_CALLS',80)),ENGINE_BUILD=runtime.revision,
+               IMAGE_MODEL=st.secrets.get('IMAGE_MODEL','gpt-image-1.5'))
     cfg['HOSTED_SHORTLIST'] = True
     return cfg
 
@@ -157,9 +158,11 @@ with tabs[1]:
                 st.caption('Discovery frames are sampled every three seconds. Candidate actions require a separate dense check.')
             if state.get('error'):st.error(state['error'])
             if (state.get('verification') or {}).get('review_only'):
-                if (state.get('verification') or {}).get('placeholder_steps'):
+                if (state.get('verification') or {}).get('generated_illustration_steps'):
+                    st.warning('This review video includes clearly labelled AI illustrations for unsupported steps. These are NOT JoVE footage or proof of scientific actions.')
+                elif (state.get('verification') or {}).get('placeholder_steps'):
                     st.warning('This older draft contains placeholder cards. Rebuild it with the updated editor below.')
-                else:st.info('A real-footage review MP4 and editable timeline are available below. Review labels identify uncertain visuals or timing changes.')
+                else:st.info('A JoVE-footage review MP4 and editable timeline are available below. Review labels identify uncertain visuals or timing changes.')
             if state['status'] in {'failed','needs_review'}:
                 st.download_button('Download private diagnostics',manager().diagnostics(ident,email),
                     file_name='project-diagnostics.zip',key='download-diagnostics',mime='application/zip')
