@@ -1,0 +1,30 @@
+name: ASVP DOCX source ingestion regression
+
+on:
+  pull_request:
+    paths:
+      - 'studio/pipeline/documents.py'
+      - 'studio/tests/test_word_source_ingestion.py'
+      - '.github/workflows/asvp-docx-regression.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  word-scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install DOCX dependency
+        run: python -m pip install "python-docx>=1.1,<2"
+      - name: Compile updated code
+        run: python -m compileall -q studio/pipeline/documents.py studio/tests/test_word_source_ingestion.py
+      - name: Verify DOCX source processing (no provider calls)
+        env:
+          PYTHONPATH: studio
+        run: python -m unittest discover -s studio/tests -p 'test_word_source_ingestion.py' -v
