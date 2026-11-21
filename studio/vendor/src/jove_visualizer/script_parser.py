@@ -75,7 +75,7 @@ def _repair_standalone_notes(items: list[dict]) -> list[dict]:
         if repaired and _is_scientific_note(joined):
             detail = _strip_note_prefix(joined)
             if detail:
-                repaired[-1]["parts"].append(f"On-screen scientific detail: {detail}")
+                repaired[-1].setdefault("on_screen_text", []).append(detail)
             repaired[-1]["production_notes"].extend(item.get("production_notes", []))
             continue
         if repaired and _is_production_note(joined):
@@ -132,7 +132,7 @@ def parse_steps_from_text(text: str) -> list[ScriptStep]:
         elif _is_scientific_note(line):
             detail = _strip_note_prefix(line)
             if detail:
-                current["parts"].append(f"On-screen scientific detail: {detail}")
+                current.setdefault("on_screen_text", []).append(detail)
         elif _is_production_note(line):
             current["production_notes"].append(line)
         else:
@@ -154,7 +154,7 @@ def parse_steps_from_text(text: str) -> list[ScriptStep]:
             if _is_scientific_note(line) and numbered:
                 detail = _strip_note_prefix(line)
                 if detail:
-                    numbered[-1]["parts"].append(f"On-screen scientific detail: {detail}")
+                    numbered[-1].setdefault("on_screen_text", []).append(detail)
                 continue
             if _is_production_note(line) and numbered:
                 numbered[-1]["production_notes"].append(line)
@@ -187,6 +187,7 @@ def parse_steps_from_text(text: str) -> list[ScriptStep]:
                 next_text=next_text,
                 script_title=title,
                 production_notes=list(dict.fromkeys(item["production_notes"])),
+                on_screen_text=item.get("on_screen_text", []),
             )
         )
 

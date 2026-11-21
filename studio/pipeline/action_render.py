@@ -6,6 +6,7 @@ import json
 import hashlib
 import math
 import wave
+import textwrap
 import zipfile
 import xml.etree.ElementTree as ET
 from PIL import Image,ImageDraw,ImageFont
@@ -48,7 +49,7 @@ def cut_schedule(plans,audios,fps='30000/1001',plugin_cuts=False):
             review=bool(plan['needs_review'] or not .85<=speed<=1.151 or silence>.3)
             result.append({**s,'step':plan['step'],'text':plan['text'],'frames':frames,
                 'timeline_start_frame':begin+used,'timeline_end_frame':begin+cut,'video_speed':speed,
-                'review':review,'additional_viewing_seconds':silence,'missing_actions':plan['missing_actions'],'unobservable_details':plan['unobservable_details']})
+                'review':review,'on_screen_text':plan.get('on_screen_text', []),'additional_viewing_seconds':silence,'missing_actions':plan['missing_actions'],'unobservable_details':plan['unobservable_details']})
             used=cut
         adjustments.append({'step':plan['step'],'original_audio_seconds':audios[plan['step']]['duration'],
             'timeline_seconds':(end-begin)/rate,'tempo':audio_tempo,'additional_viewing_seconds':silence,
@@ -119,12 +120,17 @@ def render_actions(plans,audios,library,folder,fps='30000/1001',width=1280,heigh
             if imageio_ffmpeg.count_frames_and_secs(str(output))[0]==shot['frames']:return
         args=['-threads','1','-ss',f"{shot['start']:.9f}",'-t',f"{shot['end']-shot['start']:.9f}",'-i',source]
         base=f"setpts=(PTS-STARTPTS)/{shot['video_speed']:.12f},fps={rate},scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,tpad=stop_mode=clone:stop_duration=0.1,trim=end_frame={shot['frames']}"
-        if shot['review']:
-            # The selected footage stays visible; uncertainty is never replaced by a gap card.
-            label=Image.new('RGBA',(width,72),(0,0,0,205));draw=ImageDraw.Draw(label)
-            note='REVIEW: visual details need checking'
-            if not .85<=shot['video_speed']<=1.15:note+=f" | footage speed {shot['video_speed']:.2f}x"
-            draw.text((16,20),note,font=ImageFont.load_default(size=max(12,int(width/55))),fill='#ffd166')
+        if shot['review'] or shot['on_screen_text']:
+            font=ImageFont.load_default(size=max(12,int(width/55)))
+            lines=['REVIEW: visual details need checking'] if shot['review'] else []
+            if not .85<=shot['video_speed']<=1.15:
+                lines.append(f"Footage speed {shot['video_speed']:.2f}x")
+            for instruction in shot['on_screen_text']:
+                lines.extend(textwrap.wrap(instruction, width=max(10,int((width-32)/font.getlength('W')))))
+            line_height=font.size+6
+            label=Image.new('RGBA',(width,24+line_height*len(lines)),(0,0,0,205))
+            draw=ImageDraw.Draw(label)
+            draw.multiline_text((16,10),'\n'.join(lines),font=font,spacing=6,fill='#ffffff')
             overlay=media/f'review-{i:03}.png';label.save(overlay)
             args+=['-i',overlay,'-filter_complex_threads','1','-filter_complex',f'[0:v]{base}[v];[v][1:v]overlay=0:H-h:format=auto[out]','-map','[out]']
         else:args+=['-filter_threads','1','-vf',base]

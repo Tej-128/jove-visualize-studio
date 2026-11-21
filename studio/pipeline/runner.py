@@ -277,6 +277,8 @@ def prepare_narration(folder,step,position,voice,api_key):
 
 
 def run(folder,owner,text,config):
+    if config.get('ALLOW_AI_ILLUSTRATIONS', False) is not False:
+        raise ValueError('This worker accepts JoVE-only jobs.')
     config={**config,'_PIPELINE_STARTED':time.monotonic(),'_REUSED_STAGES':[],'_STAGE_SECONDS':{}}
     state=json.loads((folder/'state.json').read_text());store=None;remote=None;index=None
     if state['owner']!=owner:raise PermissionError('This project belongs to another user')
@@ -481,6 +483,9 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
         plans = editor.run_shortlist(rows)
     else:
         plans=editor.run(json.loads((folder/'matches.json').read_text()))
+    overlays = {step.number: step.on_screen_text for step in steps}
+    for plan in plans:
+        plan["on_screen_text"] = overlays[plan["step"]]
     missing=[s.number for s in steps if s.number not in {p['step'] for p in plans}]
     issues=[{'step':p['step'],'reason':'; '.join(p['missing_actions']+p['unobservable_details']) or 'Illustrative footage requires review.'}
             for p in plans if p['needs_review']]
@@ -500,19 +505,31 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
                 or any(shot.get('medium') != 'experimental_footage' or shot.get('evidence') != 'demonstrated'
                        for shot in plan['shots'])):
             issues.append({'step':plan['step'],'reason':'Live experimental footage demonstrating the action still needs verification.'})
-    if plans and not issues:
+    # A review cut can show a demonstrated action whose conditions cannot be
+    # read from the image. Missing actions and incompatible cuts stay blocked.
+    metadata_review = bool(issues) and not missing and not config.get('HOSTED_SHORTLIST') and all(
+        plan.get('scientific_audit', {}).get('status') == 'compatible'
+        and plan.get('scientific_audit_checked') and plan.get('dense_checked')
+        and not plan['missing_actions'] and plan['shots']
+        and all(s.get('evidence') == 'demonstrated' and s.get('medium') == 'experimental_footage'
+                for s in plan['shots'])
+        for plan in plans)
+    if plans and (not issues or metadata_review):
         try:
             scheduled, _, _ = cut_schedule(plans, audio_map, plugin_cuts=bool(config.get('HOSTED_SHORTLIST')))
-            for number in sorted({shot['step'] for shot in scheduled if shot['review']}):
+            for number in sorted({shot['step'] for shot in scheduled if not .85 <= shot['video_speed'] <= 1.151 or shot['additional_viewing_seconds'] > .3}):
+                metadata_review = False
                 issues.append({'step':number,'reason':'The final cut exceeds the allowed playback speed or narration pause.'})
         except TimingCoverageError as exc:
+            metadata_review = False
             issues.append({'reason':str(exc)})
-    if not plans or issues:
+    if not plans or (issues and not metadata_review):
         report['issues'] = issues
         write_json(folder/'report.json',report);store.upload(folder/'report.json',remote)
         quality=quality_report(steps,plans,[],time.monotonic()-config.get('_PIPELINE_STARTED',started))
         write_json(folder/'quality.json',quality);store.upload(folder/'quality.json',remote)
-        checkpoint('review','needs_review',issues=issues,verification=None,
+        checkpoint('review','needs_review',issues=issues,verification=None,processing_status='complete',
+                   technical_status='not_rendered',scientific_status='review_required',
                    detail='The edit needs verified live footage and natural timing for every step. See the saved review reasons.')
         return
     checkpoint('assembly',detail=f'Rendering {len(plans)} script steps using real source footage. Narration is retained; review flags stay visible.',issues=issues)
@@ -533,7 +550,8 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
         store.upload(folder/name,remote)
     checkpoint('review' if result['review_only'] else 'complete','needs_review' if result['review_only'] else 'complete',
                detail=f"MP4 and editable timeline rendered with real footage for {len(plans)} of {len(steps)} steps. No placeholder cards. Review the listed uncertainties before production use.",
-               issues=issues,verification=result,timing_attempted=True,full_subset_finished=True,completed_visual_steps=len(steps))
+               issues=issues,verification=result,timing_attempted=True,full_subset_finished=True,completed_visual_steps=len(steps),
+               processing_status='complete',technical_status='rendered',scientific_status='human_review_required')
 
 
 def run_timing(folder,owner,config):

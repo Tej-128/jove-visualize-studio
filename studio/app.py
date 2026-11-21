@@ -58,6 +58,7 @@ def settings():
     cfg.update(TEXT_MODEL=st.secrets.get('TEXT_MODEL','gpt-5-mini'),VISION_MODEL=st.secrets.get('VISION_MODEL','gpt-4.1-mini'),
                MAX_VISION_CALLS=int(st.secrets.get('MAX_VISION_CALLS',80)),ENGINE_BUILD=runtime.revision)
     cfg['HOSTED_SHORTLIST'] = True
+    cfg['ALLOW_AI_ILLUSTRATIONS'] = False
     return cfg
 
 with st.sidebar:

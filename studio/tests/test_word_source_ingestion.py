@@ -6,6 +6,10 @@ import re
 
 from docx import Document
 from pipeline.documents import word_script_text
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "vendor" / "src"))
+from jove_visualizer.script_parser import parse_steps_from_text
 
 
 class WordSourceIngestionTests(TestCase):
@@ -41,6 +45,11 @@ class WordSourceIngestionTests(TestCase):
         self.assertIn("Add onscreen TXT: Wash buffer:",text)
         self.assertIn("Add onscreen TXT: Blocking buffer:",text)
         self.assertIn("Reference paper:",text)
+        parsed = parse_steps_from_text(text)
+        self.assertEqual([s.number for s in parsed], list(range(1, 9)))
+        self.assertEqual([s.text for s in parsed], [f"Action {i}." for i in range(1, 9)])
+        self.assertEqual(parsed[4].on_screen_text, ["Wash buffer: PBS with 0.05% Tween 20"])
+        self.assertEqual(parsed[6].on_screen_text, ["Blocking buffer: PBS with 5% BSA"])
 
 
 if __name__=="__main__":

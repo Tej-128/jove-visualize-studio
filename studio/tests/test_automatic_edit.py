@@ -254,13 +254,14 @@ class MultiShotMediaTests(unittest.TestCase):
             self.assertGreaterEqual(len(samples),6)
             self.assertTrue(all(1<=s['time']<=3 for s in samples))
             self.assertEqual(len(list((root/'samples').glob('*.log'))),1)
-            plans=[dict(step=1,text='Transfer and count.',needs_review=True,missing_actions=[],unobservable_details=['Count uncertain'],
+            plans=[dict(step=1,text='Transfer and count.',needs_review=True,missing_actions=[],unobservable_details=['Count uncertain'],on_screen_text=['Buffer composition from script'],
                         shots=[dict(video_id='101',start=1.,end=3.,reason='Transfer.',evidence='demonstrated',tier='suggested_timestamp'),
                                dict(video_id='101',start=4.,end=6.,reason='Counting.',evidence='illustrative',tier='suggested_timestamp')])]
             (out/'media').mkdir();(out/'media'/'shot-999.mp4').write_bytes(b'obsolete prior edit')
             result=render_actions(plans,{1:{'path':str(voice),'duration':4}},SimpleNamespace(video=lambda _:source),out,width=320,height=180)
             count,_=imageio_ffmpeg.count_frames_and_secs(str(out/'preview.mp4'))
             self.assertEqual(count,result['frames']);self.assertEqual(result['shots'],2)
+            self.assertEqual(json.loads((out/'edit_plan.json').read_text())['shots'][0]['on_screen_text'],['Buffer composition from script'])
             self.assertEqual(result['placeholder_steps'],[]);self.assertTrue(result['review_only'])
             with wave.open(str(out/'narration.wav')) as audio:self.assertAlmostEqual(audio.getnframes()/audio.getframerate(),4,places=1)
             with zipfile.ZipFile(out/'editable-package.zip') as archive:
