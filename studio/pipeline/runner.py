@@ -264,14 +264,15 @@ def run_catalog(folder,owner,config):
 
 def prepare_narration(folder,step,position,voice,api_key):
     path=folder/f'narration-{position+1:03}.wav';generated=False
+    narration = getattr(step, 'narration_text', '') or step.text
     if path.exists() and path.with_suffix('.json').exists():
         info=json.loads(path.with_suffix('.json').read_text())
         from .tts_preprocessor import prepare_script_for_tts
-        spoken='\n\n'.join(prepare_script_for_tts(step.text)[0])
+        spoken='\n\n'.join(prepare_script_for_tts(narration)[0])
         if info.get('spoken')!=spoken or info.get('voice_id')!=voice['id'] or info.get('generation_speed')!=float(voice['speed']):
             raise ValueError('Saved narration uses a different script or voice profile; choose its original profile or start a new project.')
     else:
-        info=generate_step_audio(step.text,step.previous_text,step.next_text,voice['id'],float(voice['speed']),api_key,path)
+        info=generate_step_audio(narration,step.previous_text,step.next_text,voice['id'],float(voice['speed']),api_key,path)
         generated=True
     return position,path,info,generated
 
@@ -458,7 +459,7 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
     from .automatic_edit import AutomaticEditor,VERSION
     from .action_render import render_actions, cut_schedule, TimingCoverageError
     from .action_catalog import open_catalog
-    from .editorial import quality_report
+    from .editorial import quality_report, metadata_only_review
     started=time.monotonic()
     checkpoint('visual_verification',detail='Checking suggested timestamps first. Suitable footage is retained while timing is solved separately.',
                editor_version=VERSION,engine_build=config.get('ENGINE_BUILD'),verification=None,total_visual_steps=len(steps),completed_visual_steps=0)
@@ -507,13 +508,7 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
             issues.append({'step':plan['step'],'reason':'Live experimental footage demonstrating the action still needs verification.'})
     # A review cut can show a demonstrated action whose conditions cannot be
     # read from the image. Missing actions and incompatible cuts stay blocked.
-    metadata_review = bool(issues) and not missing and not config.get('HOSTED_SHORTLIST') and all(
-        plan.get('scientific_audit', {}).get('status') == 'compatible'
-        and plan.get('scientific_audit_checked') and plan.get('dense_checked')
-        and not plan['missing_actions'] and plan['shots']
-        and all(s.get('evidence') == 'demonstrated' and s.get('medium') == 'experimental_footage'
-                for s in plan['shots'])
-        for plan in plans)
+    metadata_review = bool(issues) and not missing and all(metadata_only_review(p) for p in plans)
     if plans and (not issues or metadata_review):
         try:
             scheduled, _, _ = cut_schedule(plans, audio_map, plugin_cuts=bool(config.get('HOSTED_SHORTLIST')))

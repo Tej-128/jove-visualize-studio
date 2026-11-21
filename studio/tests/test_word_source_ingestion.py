@@ -13,6 +13,13 @@ from jove_visualizer.script_parser import parse_steps_from_text
 
 
 class WordSourceIngestionTests(TestCase):
+    def test_pronunciation_is_spoken_and_editorial_text_stays_off_the_voice_track(self):
+        steps = parse_steps_from_text("Title\n1. Label ABC-2 (pronounce ay bee see two).\n"
+                                     "Add onscreen TXT: Example caption\n2. Record the result.")
+        self.assertIn("ABC-2", steps[0].text)
+        self.assertIn("ay bee see two", steps[0].narration_text)
+        self.assertNotIn("Example caption", steps[0].narration_text)
+        self.assertNotIn("pronounce", steps[0].narration_text)
     def test_literal_numbered_steps_work_when_numbering_relationship_is_absent(self):
         doc=Document()
         doc.add_paragraph("Assessing Locomotor Function in Drosophila")

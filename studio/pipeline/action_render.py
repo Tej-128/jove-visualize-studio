@@ -107,7 +107,13 @@ def render_actions(plans,audios,library,folder,fps='30000/1001',width=1280,heigh
     if not plans:raise ValueError('No usable source footage is available; unrelated footage will not be invented.')
     shots,adjustments,frames=cut_schedule(plans,audios,fps,plugin_cuts);rate=Fraction(fps)
     if plugin_cuts and any(s['review'] for s in shots):
-        raise TimingCoverageError('A selected shot still needs review.')
+        from .editorial import metadata_only_review
+        by_step = {plan['step']: plan for plan in plans}
+        for shot in shots:
+            if shot['review'] and (not metadata_only_review(by_step[shot['step']])
+                                  or not .85 <= shot['video_speed'] <= 1.15
+                                  or shot['additional_viewing_seconds'] > .3):
+                raise TimingCoverageError('A selected shot still needs review.')
     # Resolve and validate source paths before concurrent encoders read them.
     paths={s['video_id']:library.video(s['video_id']) for s in shots}
     def prepare(pair):

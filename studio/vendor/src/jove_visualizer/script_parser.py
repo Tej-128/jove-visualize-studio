@@ -62,6 +62,12 @@ def _split_production_parentheticals(text: str) -> tuple[str, list[str]]:
     return cleaned, notes
 
 
+def _spoken_line(text: str) -> str:
+    text = re.sub(r"(?<!\S)[\w-]+\s+\((?:pronounce|read as)\s+([^()]+)\)",
+                  r"\1", text, flags=re.I)
+    return _split_production_parentheticals(text)[0]
+
+
 def _repair_standalone_notes(items: list[dict]) -> list[dict]:
     """Repair any note accidentally interpreted as its own numbered step.
 
@@ -118,6 +124,7 @@ def parse_steps_from_text(text: str) -> list[ScriptStep]:
             step_text, parenthetical_notes = _split_production_parentheticals(match.group(2).strip())
             current = {
                 "number": int(match.group(1)),
+                "spoken": [_spoken_line(match.group(2))],
                 "parts": [step_text] if step_text else [],
                 "production_notes": parenthetical_notes,
             }
@@ -139,6 +146,7 @@ def parse_steps_from_text(text: str) -> list[ScriptStep]:
             cleaned, parenthetical_notes = _split_production_parentheticals(line)
             if cleaned:
                 current["parts"].append(cleaned)
+                current["spoken"].append(_spoken_line(line))
             current["production_notes"].extend(parenthetical_notes)
 
     if current is not None:
@@ -163,6 +171,7 @@ def parse_steps_from_text(text: str) -> list[ScriptStep]:
             if cleaned:
                 numbered.append({
                     "number": len(numbered) + 1,
+                    "spoken": [_spoken_line(line)],
                     "parts": [cleaned],
                     "production_notes": parenthetical_notes,
                 })
@@ -188,6 +197,7 @@ def parse_steps_from_text(text: str) -> list[ScriptStep]:
                 script_title=title,
                 production_notes=list(dict.fromkeys(item["production_notes"])),
                 on_screen_text=item.get("on_screen_text", []),
+                narration_text=" ".join(item["spoken"]).strip(),
             )
         )
 

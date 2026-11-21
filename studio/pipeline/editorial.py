@@ -15,6 +15,16 @@ def coverage_gaps(step,shots):
     return [unit for unit in action_units(step.text) if not any(unit.lower()==q for q in covered)]
 
 
+def metadata_only_review(plan):
+    """Permit an annotated cut only when every action passed both visual checks."""
+    shots = plan.get('shots', [])
+    return bool(shots and plan.get('dense_checked') and plan.get('scientific_audit_checked')
+                and plan.get('scientific_audit', {}).get('status') == 'compatible'
+                and not plan.get('missing_actions') and not plan.get('needs_timing_review')
+                and all(s.get('medium') == 'experimental_footage' and s.get('evidence') == 'demonstrated'
+                        for s in shots))
+
+
 def quality_report(steps,plans,adjustments,processing_seconds=None):
     """A rendered file never by itself passes the editorial release gate."""
     expected={s.number for s in steps};found={p['step'] for p in plans}

@@ -56,7 +56,7 @@ def main():
             verified[match[1]] = path
     catalog = ActionCatalog(folder/'cache', {k:{'sha256':v} for k,v in sources.items()})
     catalog.load(args.catalog)
-    run.update(catalog_sha256=digest(args.catalog), catalogued=len(catalog.data['videos']),
+    run.update(corpus_sha256=digest(args.corpus), catalog_sha256=digest(args.catalog), catalogued=len(catalog.data['videos']),
                authorized_sources=len(sources), verified_media=len(verified), library_fingerprint=catalog.signature)
     save('sources.json', {k:{'sha256':sources[k],'filename':v.name} for k,v in verified.items()})
     run['seconds']['library_validation'] = time.monotonic()-t
