@@ -481,12 +481,9 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
     editor=AutomaticEditor(index,library,gateway,folder/'automatic',steps,audio_map,progress=progress,
         seconds=max(1,min(int(config.get('VISUAL_REVIEW_SECONDS',300)),remaining)),workers=int(config.get('VISUAL_WORKERS',3)),action_catalog=catalog,
         audit_required=bool(config.get('SCIENTIFIC_AUDIT',False)),decomposer=partial(decompose_step,gateway=gateway))
-    if config.get('HOSTED_SHORTLIST'):
-        from .sheets import read_candidates
-        rows = read_candidates((folder/'matches.xlsx').read_bytes())
-        plans = editor.run_shortlist(rows)
-    else:
-        plans=editor.run(json.loads((folder/'matches.json').read_text()))
+    # Hosted jobs use the full search order too (suggested ranges first, then wider
+    # retrieval); HOSTED_SHORTLIST only selects plugin-style cuts. Every step returns a plan.
+    plans=editor.run(json.loads((folder/'matches.json').read_text()))
     overlays = {step.number: step.on_screen_text for step in steps}
     for plan in plans:
         plan["on_screen_text"] = overlays[plan["step"]]
@@ -500,8 +497,7 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
             'stage_seconds':dict(config.get('_STAGE_SECONDS',{})),
             'attempts':editor.attempts,'model_requests':gateway.prior_calls+gateway.calls,
             'visual_seconds':round(time.monotonic()-started,2),'input_contract':'Plain script only. No reference timestamps or benchmark selections were supplied to this editor.',
-            'review_method':('Sheet-only visual review on the review-draft contract.'
-                             if config.get('HOSTED_SHORTLIST') else 'Suggested ranges followed by wider retrieval and visual discovery, on the review-draft contract.')}
+            'review_method':'Suggested ranges followed by wider retrieval and visual discovery, on the review-draft contract.'}
     write_json(folder/'report.json',report);store.upload(folder/'report.json',remote)
     # A review draft is always rendered: every narration step stays on the timeline,
     # footage limitations are labelled, and approval stays with the human reviewer.

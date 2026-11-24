@@ -231,8 +231,7 @@ class FakeGateway:
 
 
 class HostedJobPathTests(unittest.TestCase):
-    def test_hosted_shortlist_job_always_renders_review_files_for_every_step(self):
-        from openpyxl import Workbook
+    def test_hosted_job_always_renders_review_files_for_every_step(self):
         from pipeline.runner import run_automatic_edit
         with TemporaryDirectory() as t:
             root = Path(t);folder = root / 'job';folder.mkdir();source = root / '101.mp4'
@@ -246,13 +245,13 @@ class HostedJobPathTests(unittest.TestCase):
                 execute(['-f', 'lavfi', '-i', f'sine=frequency=440:sample_rate=44100:duration={seconds}', '-c:a', 'pcm_s16le', voice],
                         root / f'make-voice-{step.number}.log')
                 audios.append({'path': str(voice), 'duration': seconds})
-            book = Workbook();sheet = book.active
-            sheet.append(['Step', 'Script Step', 'Journal ID', 'Start', 'End', 'Matching CC Text'])
-            sheet.append([1, STEPS['plate'], '101', 2, 12, 'Pipette into the wells.'])
-            sheet.append([2, STEPS['software'], '101', 20, 30, 'Title card.'])
-            book.save(folder / 'matches.xlsx')
+            (folder / 'matches.json').write_text(json.dumps([
+                {'step_number': 1, 'best_match': {'journal_id': '101', 'start_timestamp': '00:02', 'end_timestamp': '00:12',
+                                                  'caption_passage': 'Pipette into the wells.'}},
+                {'step_number': 2, 'best_match': {'journal_id': '101', 'start_timestamp': '00:20', 'end_timestamp': '00:30',
+                                                  'caption_passage': 'Title card.'}}]), encoding='utf-8')
             library = SimpleNamespace(videos={'101': {'sha256': 'a' * 64, 'filename': '101.mp4'}}, video=lambda _: source,
-                                      cache=root / 'cache', has_prepared_overview=lambda _: True)
+                                      cache=root / 'cache', has_prepared_overview=lambda _: True, restore_overviews=Mock())
             checkpoint, store = Mock(), Mock()
             config = {'OPENAI_API_KEY': 'unused', 'OUTPUT_FOLDER_ID': 'out', 'HOSTED_SHORTLIST': True}
             with patch('pipeline.runner.ModelGateway', return_value=FakeGateway()), \

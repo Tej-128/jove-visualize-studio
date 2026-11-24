@@ -66,7 +66,7 @@ OUTPUT RULES
 - visible_observations: what can actually be seen in the frames.
 - editor_note: a brief, factual instruction for the human editor.
 - Keep every statement tied to visible frames or supplied source information.
-- Do not claim that an experiment was performed correctly. Do not fill in invisible details from scientific expectations or common practice.
+- Do not claim that an experiment was performed correctly. Do not fill in invisible details from scientific expectations or common practice, and do not introduce attributes from other protocols.
 - Do not invent a window, timestamp, candidate or visual observation. Identify footage only by the supplied window_id.
 - Keep uncertainty explicit and concise.
 - If no useful shot exists, return an empty shots list and list the missing actions.'''
