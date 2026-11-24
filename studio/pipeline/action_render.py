@@ -55,11 +55,10 @@ def cut_schedule(plans,audios,fps='30000/1001',plugin_cuts=False):
             'timeline_seconds':(end-begin)/rate,'tempo':audio_tempo,'additional_viewing_seconds':silence,
             'source_video_seconds':total,'video_speed':total/((end-begin)/rate),
             'review':any(s['review'] for s in result if s['step']==plan['step'])})
-    if plugin_cuts:
+    if len(result) > 1:
         for i, shot in enumerate(result):
-            section = shot.get('section', shot['step'])
-            left = i > 0 and section != result[i-1].get('section',result[i-1]['step'])
-            right = i+1 < len(result) and section != result[i+1].get('section',result[i+1]['step'])
+            left = i > 0
+            right = i+1 < len(result)
             shot.update(left_handle=4*left, right_handle=4*right)
             length = shot['frames'] + shot['left_handle'] + shot['right_handle']
             shot['encoded_frames'] = length
@@ -167,7 +166,8 @@ def render_actions(plans,audios,library,folder,fps='30000/1001',width=1280,heigh
         for i,s in enumerate(shots[1:],1):
             operation=(f"xfade=duration={8/float(rate):.12f}:offset={(s['timeline_start_frame']-4)/float(rate):.12f}"
                        if s['left_handle'] else 'concat=n=2:v=1:a=0')
-            filters.append(f'[{previous}][v{i}]{operation},fps={rate}[j{i}]')
+            expected_end = s['timeline_end_frame'] + s['right_handle']
+            filters.append(f'[{previous}][v{i}]{operation},fps={rate},tpad=stop_mode=clone:stop=2,trim=end_frame={expected_end}[j{i}]')
             previous=f'j{i}'
         execute(args+['-i',folder/'narration.wav','-filter_complex',';'.join(filters+[f'[{previous}]tpad=stop_mode=clone:stop=1[final]']),'-map','[final]',
             '-map',f'{len(shots)}:a','-r',str(rate),'-frames:v',str(frames),'-c:v','libx264','-threads','2',
@@ -180,7 +180,7 @@ def render_actions(plans,audios,library,folder,fps='30000/1001',width=1280,heigh
     if actual!=frames:raise ValueError(f'Rendered frame count mismatch: expected {frames}, received {actual}')
     build_cut_timeline(folder,shots,frames,rate,width,height)
     plan={'version':1,'fps':fps,'frames':frames,'shots':shots,'steps':plans,'audio_adjustments':adjustments,
-          'transition_policy':'Centered eight-frame dissolve at section changes' if plugin_cuts else 'Straight cuts'}
+          'transition_policy':'Centered eight-frame dissolve at every join'}
     (folder/'edit_plan.json').write_text(json.dumps(plan,indent=2),encoding='utf-8')
     (folder/'audio-adjustments.json').write_text(json.dumps(adjustments,indent=2),encoding='utf-8')
     with zipfile.ZipFile(folder/'editable-package.zip','w',compression=zipfile.ZIP_STORED) as archive:
@@ -189,5 +189,7 @@ def render_actions(plans,audios,library,folder,fps='30000/1001',width=1280,heigh
     return {'frames':frames,'fps':fps,'duration':frames/float(rate),'shots':len(shots),'steps':len(plans),
             'review_only':any(s['review'] for s in shots),'placeholder_steps':[],
             'footage_steps':len(plans),'verified_steps':sum(not p['needs_review'] for p in plans),'dissolves':sum(bool(s.get('left_handle')) for s in shots)}
+
+
 
 
