@@ -34,9 +34,12 @@ class EditorialGateTests(unittest.TestCase):
             SimpleNamespace(number=1,text='Transfer flies and count them.'))
         self.assertIn('count them',plan['missing_actions']);self.assertTrue(plan['needs_review'])
 
-    def test_actual_renderer_rejects_the_observed_subsecond_action_across_long_vo(self):
+    def test_subsecond_action_is_held_and_flagged_instead_of_stretched_across_long_vo(self):
         plan={'step':1,'shots':[{'start':1.,'end':1.7}]}
-        with self.assertRaises(TimingCoverageError):cut_schedule([plan],{1:{'duration':8.58}})
+        shots,adjustments,_=cut_schedule([plan],{1:{'duration':8.58}})
+        self.assertEqual(shots[0]['video_speed'],1.)
+        self.assertGreater(shots[0]['hold_seconds'],7);self.assertGreater(adjustments[0]['hold_seconds'],7)
+        self.assertTrue(shots[0]['review'])
 
     def test_output_with_uncertain_footage_never_passes_quality_gate(self):
         step=SimpleNamespace(number=1)

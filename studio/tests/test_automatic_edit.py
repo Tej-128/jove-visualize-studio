@@ -144,7 +144,7 @@ class AutomaticSelectionTests(unittest.TestCase):
             caption_fallback.assert_not_called()
             self.assertLess(tiers.index('suggested_timestamp'),tiers.index('wider_library_visual'))
 
-    def test_provider_failure_preserves_an_explicitly_unverified_retrieved_candidate(self):
+    def test_provider_failure_keeps_the_step_as_a_labelled_gap_without_unreviewed_footage(self):
         step=SimpleNamespace(number=1,text='Transfer flies into the tube.')
         matches=[dict(step_number=1,best_match=dict(journal_id='101',start_timestamp='00:01',end_timestamp='00:10',caption_passage='Transfer flies.'))]
         with TemporaryDirectory() as t:
@@ -157,10 +157,11 @@ class AutomaticSelectionTests(unittest.TestCase):
                 result=AutomaticEditor(None,library,gateway,t,[step],{1:{'duration':7}},workers=1).run(matches)
             self.assertEqual(len(result),1)
             self.assertTrue(result[0]['needs_review'])
-            self.assertEqual(result[0]['shots'][0]['evidence'],'uncertain')
-            self.assertEqual(result[0]['shots'][0]['tier'],'unverified_retrieval')
+            self.assertEqual(result[0]['shots'],[]);self.assertEqual(result[0]['status'],'no_suitable_footage')
+            flags=' '.join(result[0]['review_flags']).lower()
+            self.assertIn('failed',flags);self.assertIn('101 1-10 s',flags)
 
-    def test_review_fallback_preserves_a_brief_action_in_a_normal_speed_excerpt(self):
+    def test_brief_reviewed_action_is_kept_for_a_hold_instead_of_unreviewed_padding(self):
         step=SimpleNamespace(number=1,text='Transfer flies into the tube.')
         matches=[dict(step_number=1,best_match=dict(journal_id='101',start_timestamp='00:01',end_timestamp='00:12',caption_passage='Transfer flies.'))]
         with TemporaryDirectory() as t:
@@ -172,10 +173,9 @@ class AutomaticSelectionTests(unittest.TestCase):
             with patch('pipeline.automatic_edit.duration',return_value=20),patch('pipeline.automatic_edit.Selector.wider_candidates',return_value=[]):
                 result=editor.run(matches)
             shot=result[0]['shots'][0]
-            self.assertAlmostEqual(shot['end']-shot['start'],8)
-            self.assertTrue(shot['known_action_sampled'])
-            self.assertLessEqual(shot['start'],5);self.assertGreaterEqual(shot['end'],5.7)
-            self.assertEqual(shot['evidence'],'uncertain');self.assertTrue(result[0]['needs_review'])
+            # The reviewed brief action is kept; the renderer holds its last frame and reports it.
+            self.assertEqual((shot['start'],shot['end']),(5.,5.7))
+            self.assertEqual(result[0]['status'],'representative_only');self.assertTrue(result[0]['needs_review'])
 
     def test_explicitly_rejected_window_is_not_relabelled_as_verified_fallback(self):
         step=SimpleNamespace(number=1,text='Transfer flies into the tube.')
@@ -188,7 +188,8 @@ class AutomaticSelectionTests(unittest.TestCase):
                  patch('pipeline.automatic_edit.screen_video',side_effect=TimeoutError),\
                  patch('pipeline.automatic_edit.Selector.wider_candidates',return_value=[]):
                 result=AutomaticEditor(None,library,gateway,t,[step],{1:{'duration':7}},workers=1).run(matches)
-            self.assertEqual(result,[])
+            self.assertEqual(len(result),1)
+            self.assertEqual(result[0]['shots'],[]);self.assertEqual(result[0]['status'],'no_suitable_footage')
 
     def test_default_runner_routes_plain_script_to_new_editor_without_reference_input(self):
         with TemporaryDirectory() as t:
@@ -232,18 +233,24 @@ class AutomaticSelectionTests(unittest.TestCase):
             self.assertTrue(all('elapsed_seconds' in x for x in saved))
 
 class MultiShotMediaTests(unittest.TestCase):
-    def test_long_action_cannot_create_extreme_video_or_voice_playback_speed(self):
+    def test_long_action_is_trimmed_around_the_action_instead_of_fast_forwarded(self):
         plans=[{'step':1,'text':'Transfer flies.','needs_review':False,'missing_actions':[],'unobservable_details':[],
-                'shots':[dict(video_id='101',start=1.,end=61.,reason='A long complete action')]}]
+                'shots':[dict(video_id='101',start=1.,end=61.,action_start=30.,action_end=33.,reason='A long complete action')]}]
         shots,adjustments,total=cut_schedule(plans,{1:{'duration':7}})
         self.assertLessEqual(shots[0]['video_speed'],1.151)
         self.assertGreaterEqual(adjustments[0]['tempo'],.95)
-        self.assertGreater(adjustments[0]['additional_viewing_seconds'],30)
+        self.assertLessEqual(shots[0]['start'],30.);self.assertGreaterEqual(shots[0]['end'],33.)
+        self.assertAlmostEqual(shots[0]['end']-shots[0]['start'],7,places=1)
+        self.assertGreater(adjustments[0]['trimmed_seconds'],50)
+        self.assertEqual(adjustments[0]['additional_viewing_seconds'],0.)
         self.assertTrue(shots[0]['review'])
-    def test_multi_shot_schedule_keeps_speech_natural_and_reports_extreme_video_speed(self):
+    def test_short_multi_shot_footage_plays_at_native_speed_then_holds_and_reports_it(self):
         plans=[{'step':1,'text':'Transfer flies.','needs_review':False,'missing_actions':[],'unobservable_details':[],
                 'shots':[dict(video_id='101',start=1.,end=3.,reason='First action'),dict(video_id='101',start=4.,end=6.,reason='Second action')]}]
-        with self.assertRaises(TimingCoverageError):cut_schedule(plans,{1:{'duration':7}})
+        shots,adjustments,_=cut_schedule(plans,{1:{'duration':7}})
+        self.assertTrue(all(.85<=s['video_speed']<=1.15 for s in shots))
+        self.assertGreater(adjustments[0]['hold_seconds'],2.5);self.assertGreater(shots[-1]['hold_seconds'],2.5)
+        self.assertEqual(sum(s['frames'] for s in shots),round(7*30000/1001))
 
     def test_real_multi_shot_edit_has_no_cards_complete_audio_and_portable_timeline(self):
         with TemporaryDirectory() as t:

@@ -173,7 +173,9 @@ with tabs[1]:
                     number=st.selectbox('Script step',numbers,key='review-step-'+ident)
                     selected=[(i,s) for i,s in enumerate(plan['shots']) if s['step']==number]
                     for i,shot in selected:
-                        st.write(shot.get('text',''));st.caption(f"Source {shot['video_id']} · {shot['start']:.2f}–{shot['end']:.2f} seconds · {shot.get('evidence','uncertain')} · playback {shot.get('video_speed',1.):.2f}×")
+                        st.write(shot.get('text',''))
+                        if shot.get('kind')=='slate':st.caption('No suitable footage was found for this step. A labelled card holds the narration.')
+                        else:st.caption(f"Source {shot['video_id']} · {shot['start']:.2f}–{shot['end']:.2f} seconds · {(shot.get('status') or 'review').replace('_',' ')} · {shot.get('evidence_level','representative').replace('_',' ')} · playback {shot.get('video_speed',1.):.2f}×")
                         preview=manager().shot_preview(ident,email,i)
                         if preview.is_file():st.video(str(preview))
                     retry_consent=st.checkbox('Find different footage for this step using existing credits.',key='retry-consent-'+ident)
@@ -181,7 +183,7 @@ with tabs[1]:
                         try:
                             cfg=settings();cfg['voice']=dict(profiles[profile]);manager().review_step(ident,email,number,cfg);st.rerun()
                         except (ValueError,PermissionError) as exc:st.error(str(exc))
-            for name in ['matches.xlsx','report.json','quality.json','coverage.json','audio-adjustments.json','preview.mp4','editable-package.zip']:
+            for name in ['review.md','review.json','matches.xlsx','report.json','quality.json','coverage.json','audio-adjustments.json','preview.mp4','editable-package.zip']:
                 if state['status'] in {'running','queued'} and name in {'preview.mp4','editable-package.zip','audio-adjustments.json'}:continue
                 if state.get('editor_version') and not state.get('verification') and name in {'preview.mp4','editable-package.zip','audio-adjustments.json'}:continue
                 path=manager().file(ident,email,name)
@@ -189,7 +191,7 @@ with tabs[1]:
                     if name=='preview.mp4':st.video(str(path))
                     if path.stat().st_size<150*1024**2:
                         st.download_button('Download '+name,path.read_bytes(),file_name=name,key='download-'+name)
-            if state['status']=='complete':st.caption('Draft complete. Scientific and playback review remain required before production approval.')
+            if state['status'] in {'complete','needs_review'} and state.get('verification'):st.caption('Review draft: every narration step is on the timeline. Footage selection is not scientific approval; the scientific reviewer approves.')
         show_job()
 
 with tabs[2]:
