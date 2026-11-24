@@ -106,7 +106,7 @@ class AutomaticSelectionTests(unittest.TestCase):
             self.assertAlmostEqual(result['shots'][0]['end']-result['shots'][0]['start'],8)
             sent=gateway.ask.call_args.args[1]['windows'][0]
             self.assertEqual(sent['source_captions'][0]['text'],'Actual source transfer procedure.')
-            strict=gateway.ask.call_args.kwargs['schema']['properties']['shots']['items']['properties']
+            strict=gateway.ask.call_args.kwargs['schema']['properties']['windows']['items']['properties']
             self.assertEqual(strict['start']['enum'],[1.35]);self.assertEqual(strict['end']['enum'],[9.35])
 
     def test_source_caption_grounding_is_present_in_both_visual_checks(self):

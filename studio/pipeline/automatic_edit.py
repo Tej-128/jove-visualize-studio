@@ -15,9 +15,9 @@ from .media import duration,sample_window
 from .providers import VisionBudgetExceeded
 from .selection import Selector
 from .editorial import action_units,coverage_gaps
-from .review_contract import EDITOR_PROMPT,review_schema,review_plan,decompose_step,annotate
+from .review_contract import EDITOR_PROMPT,review_schema,review_plan,decompose_step,annotate,schema_items
 
-VERSION=9
+VERSION=10
 # The editorial contract (and its general, script-independent rules) lives in
 # review_contract.py. PLAN_RULES stays as an alias for existing callers.
 PLAN_RULES=EDITOR_PROMPT
@@ -89,8 +89,9 @@ class AutomaticEditor:
     def is_excluded(self,shot,step):
         return any(x['step']==step and str(x['video_id'])==str(shot['video_id']) and shot['start']<x['end'] and shot['end']>x['start'] for x in self.excluded)
 
-    def validate(self,answer,windows,step):
-        plan=review_plan(answer,windows,step.number,step.text,self.actions_for(step))
+    def validate(self,answer,windows,step,keep_all=False):
+        plan=review_plan(answer,windows,step.number,step.text,self.actions_for(step),
+                         narration_seconds=self.audios.get(step.number,{}).get('duration'),keep_all=keep_all)
         if plan is None:return None
         known=self.exclusions.setdefault(step.number,[])
         known.extend(e for e in plan['exclusion_notes'] if e not in known)
@@ -210,14 +211,14 @@ class AutomaticEditor:
             for im in samples:im['label']=f"Window {w['window_id']}, video {w['video_id']}, source"
             images.extend(samples)
         schema=self.schema(step,windows)
-        props=schema['properties']['shots']['items']['properties']
+        props=schema_items(schema)
         props['start']['enum']=[w['start'] for w in windows];props['end']['enum']=[w['end'] for w in windows]
         answered=False
         try:
             answer=self.gateway.ask(PLAN_RULES,{'step':step.text,'windows':windows,'narration_seconds':voice,
                 'script_context':[{'step':s.number,'text':s.text} for s in self.steps],
-                'task':'Verify the ENTIRE fixed selected clips, including all surrounding preparation and settling. Start and end must match the proposed window boundaries exactly. Approve only continuous relevant context around the complete required action, without unrelated scenes or repeated footage. Set action_start/action_end to the actual inner action boundaries. Unseen specimen metadata is not a missing physical action. Return no shots if this context is unsuitable.'},images,schema=schema)
-            answered=True;fixed=self.validate(answer,windows,step)
+                'task':'Verify the ENTIRE fixed selected clips, including all surrounding preparation and settling. Return one verdict per window; for a kept window, start and end must equal the window boundaries exactly. Keep only continuous relevant context around the complete required action, without unrelated scenes or repeated footage. Set action_start/action_end to the actual inner action boundaries. Unseen specimen metadata is not a missing physical action. Use a non-keeping difference if this context is unsuitable.'},images,schema=schema)
+            answered=True;fixed=self.validate(answer,windows,step,keep_all=True)
         except Exception:fixed=None
         self.attempts[step.number].append({'tier':'timing_context','windows':windows,
             'status':'context_verified' if fixed else 'rejected' if answered else 'context_unverified'})
