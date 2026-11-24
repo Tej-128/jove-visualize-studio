@@ -152,7 +152,7 @@ with tabs[1]:
             if state.get('error'):st.error(state['error'])
             if (state.get('verification') or {}).get('review_only'):
                 if (state.get('verification') or {}).get('placeholder_steps'):
-                    st.warning('This older draft contains placeholder cards. Rebuild it with the updated editor below.')
+                    st.warning('Some narration steps are labelled as needing footage. See the step review notes.')
                 else:st.info('A real-footage review MP4 and editable timeline are available below. Review labels identify uncertain visuals or timing changes.')
             if state['status'] in {'failed','needs_review'}:
                 st.download_button('Download private diagnostics',manager().diagnostics(ident,email),

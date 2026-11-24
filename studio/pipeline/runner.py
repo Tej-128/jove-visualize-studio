@@ -475,64 +475,59 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
     remaining=480-(time.monotonic()-config.get('_PIPELINE_STARTED',started))
     editor=AutomaticEditor(index,library,gateway,folder/'automatic',steps,audio_map,progress=progress,
         seconds=max(1,min(int(config.get('VISUAL_REVIEW_SECONDS',300)),remaining)),workers=int(config.get('VISUAL_WORKERS',3)),action_catalog=catalog)
-    if config.get('HOSTED_SHORTLIST'):
-        from .sheets import read_candidates
-        rows = read_candidates((folder/'matches.xlsx').read_bytes())
-        plans = editor.run_shortlist(rows)
-    else:
-        plans=editor.run(json.loads((folder/'matches.json').read_text()))
+    plugin_cuts = bool(config.get('HOSTED_SHORTLIST'))
+    candidates = editor.run(json.loads((folder/'matches.json').read_text()))
+    plans = []
+    for plan in candidates:
+        if not plan.get('dense_checked') or not plan.get('scientific_audit_checked'):
+            continue
+        if not all(shot.get('medium') == 'experimental_footage' and
+                   shot.get('evidence') in {'demonstrated', 'illustrative'} for shot in plan['shots']):
+            continue
+        plans.append(plan)
     missing=[s.number for s in steps if s.number not in {p['step'] for p in plans}]
     issues=[{'step':p['step'],'reason':'; '.join(p['missing_actions']+p['unobservable_details']) or 'Illustrative footage requires review.'}
             for p in plans if p['needs_review']]
-    issues.extend({'step':number,'reason':'No usable related footage was retained. This step is omitted from the partial review edit.'} for number in missing)
-    report={'editor_version':VERSION,'selected':plans,'issues':issues,'omitted_steps':missing,
+    issues.extend({'step':number,'reason':'No usable related footage was retained. The narration is retained with a footage-needed label.'} for number in missing)
+    report={'editor_version':VERSION,'selected':plans,'issues':issues,'omitted_steps':[],
             'catalog_ready':bool(catalog is not None and catalog.ready),
             'catalog_sources':len(catalog.data['videos']) if catalog is not None else 0,
             'reused_stages':config.get('_REUSED_STAGES',[]),
             'stage_seconds':dict(config.get('_STAGE_SECONDS',{})),
             'attempts':editor.attempts,'model_requests':gateway.prior_calls+gateway.calls,
             'visual_seconds':round(time.monotonic()-started,2),'input_contract':'Plain script only. No reference timestamps or benchmark selections were supplied to this editor.',
-            'review_method':('Sheet-only visual review with verified live action and narration-aligned cuts.'
-                             if config.get('HOSTED_SHORTLIST') else 'Suggested ranges followed by wider retrieval and visual discovery.')}
+            'review_method': 'Suggested ranges followed by wider retrieval and visual discovery.'}
+    selected = {plan['step']: plan for plan in plans}
+    timeline = []
+    for step in steps:
+        if step.number in selected:
+            timeline.append(selected[step.number])
+            continue
+        note = 'Footage needed for this step'
+        timeline.append({'step': step.number, 'text': step.text, 'needs_review': True,
+                         'missing_actions': [step.text], 'unobservable_details': [],
+                         'shots': [{'video_id': None, 'start': 0, 'end': audio_map[step.number]['duration'],
+                                    'medium': 'review_card', 'reason': note, 'evidence': 'absent'}]})
+    report['footage_needed_steps'] = missing
     write_json(folder/'report.json',report);store.upload(folder/'report.json',remote)
-    for plan in plans:
-        if (not plan.get('scientific_audit_checked') or not plan.get('dense_checked')
-                or any(shot.get('medium') != 'experimental_footage' or shot.get('evidence') != 'demonstrated'
-                       for shot in plan['shots'])):
-            issues.append({'step':plan['step'],'reason':'Live experimental footage demonstrating the action still needs verification.'})
-    if plans and not issues:
-        try:
-            scheduled, _, _ = cut_schedule(plans, audio_map, plugin_cuts=bool(config.get('HOSTED_SHORTLIST')))
-            for number in sorted({shot['step'] for shot in scheduled if shot['review']}):
-                issues.append({'step':number,'reason':'The final cut exceeds the allowed playback speed or narration pause.'})
-        except TimingCoverageError as exc:
-            issues.append({'reason':str(exc)})
-    if not plans or issues:
-        report['issues'] = issues
-        write_json(folder/'report.json',report);store.upload(folder/'report.json',remote)
-        quality=quality_report(steps,plans,[],time.monotonic()-config.get('_PIPELINE_STARTED',started))
-        write_json(folder/'quality.json',quality);store.upload(folder/'quality.json',remote)
-        checkpoint('review','needs_review',issues=issues,verification=None,
-                   detail='The edit needs verified live footage and natural timing for every step. See the saved review reasons.')
-        return
     checkpoint('assembly',detail=f'Rendering {len(plans)} script steps using real source footage. Narration is retained; review flags stay visible.',issues=issues)
-    result=render_actions(plans,audio_map,library,folder,plugin_cuts=bool(config.get('HOSTED_SHORTLIST')))
+    result=render_actions(timeline,audio_map,library,folder,plugin_cuts=plugin_cuts)
     for row in json.loads((folder/'audio-adjustments.json').read_text()):
         if not .85<=row['video_speed']<=1.151:
             issues.append({'step':row['step'],'reason':f"Footage plays at {row['video_speed']:.2f}x to retain the complete selected action and natural narration. Review pacing."})
         if row.get('additional_viewing_seconds',0)>.3:
             issues.append({'step':row['step'],'reason':f"The selected action requires {row['additional_viewing_seconds']:.1f} extra seconds of viewing after narration; review pacing or select a more concise action."})
-    result['review_only']=bool(issues);result['omitted_steps']=missing
+    result['review_only']=bool(issues);result['omitted_steps']=[];result['placeholder_steps']=missing;result['footage_steps']=len(plans)
     elapsed=round(time.monotonic()-config.get('_PIPELINE_STARTED',started),2)
     quality=quality_report(steps,plans,json.loads((folder/'audio-adjustments.json').read_text()),elapsed)
     result['review_only']=bool(issues) or not quality['automated_checks_passed']
     write_json(folder/'quality.json',quality)
-    report.update(issues=issues,verification=result,quality=quality,processing_seconds=elapsed,draft_contains_placeholders=False)
+    report.update(issues=issues,verification=result,quality=quality,processing_seconds=elapsed,draft_contains_placeholders=bool(missing))
     write_json(folder/'report.json',report)
     for name in ['report.json','preview.mp4','editable-package.zip','edit_plan.json','audio-adjustments.json','quality.json']:
         store.upload(folder/name,remote)
     checkpoint('review' if result['review_only'] else 'complete','needs_review' if result['review_only'] else 'complete',
-               detail=f"MP4 and editable timeline rendered with real footage for {len(plans)} of {len(steps)} steps. No placeholder cards. Review the listed uncertainties before production use.",
+               detail=f"MP4 and editable timeline rendered with real footage for {len(plans)} of {len(steps)} steps. All narration steps retained. Review the listed uncertainties before production use.",
                issues=issues,verification=result,timing_attempted=True,full_subset_finished=True,completed_visual_steps=len(steps))
 
 

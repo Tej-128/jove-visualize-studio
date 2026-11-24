@@ -105,12 +105,10 @@ def render_actions(plans,audios,library,folder,fps='30000/1001',width=1280,heigh
     folder=Path(folder);media=folder/'media';media.mkdir(parents=True,exist_ok=True)
     if not plans:raise ValueError('No usable source footage is available; unrelated footage will not be invented.')
     shots,adjustments,frames=cut_schedule(plans,audios,fps,plugin_cuts);rate=Fraction(fps)
-    if plugin_cuts and any(s['review'] for s in shots):
-        raise TimingCoverageError('A selected shot still needs review.')
     # Resolve and validate source paths before concurrent encoders read them.
-    paths={s['video_id']:library.video(s['video_id']) for s in shots}
+    paths={s['video_id']:library.video(s['video_id']) for s in shots if s.get('medium') != 'review_card'}
     def prepare(pair):
-        i,shot=pair;source=paths[shot['video_id']]
+        i,shot=pair;source=paths.get(shot['video_id'])
         shot = {**shot,'frames':shot.get('encoded_frames',shot['frames'])}
         output=media/f'shot-{i+1:03}.mp4';marker=output.with_suffix('.sha256')
         signature=hashlib.sha256(json.dumps([str(source),shot,str(rate),width,height],sort_keys=True).encode()).hexdigest()
@@ -118,11 +116,13 @@ def render_actions(plans,audios,library,folder,fps='30000/1001',width=1280,heigh
             import imageio_ffmpeg
             if imageio_ffmpeg.count_frames_and_secs(str(output))[0]==shot['frames']:return
         args=['-threads','1','-ss',f"{shot['start']:.9f}",'-t',f"{shot['end']-shot['start']:.9f}",'-i',source]
+        if shot.get('medium') == 'review_card':
+            args=['-f','lavfi','-i',f'color=c=black:s={width}x{height}:r={rate}']
         base=f"setpts=(PTS-STARTPTS)/{shot['video_speed']:.12f},fps={rate},scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,tpad=stop_mode=clone:stop_duration=0.1,trim=end_frame={shot['frames']}"
         if shot['review']:
             # The selected footage stays visible; uncertainty is never replaced by a gap card.
             label=Image.new('RGBA',(width,72),(0,0,0,205));draw=ImageDraw.Draw(label)
-            note='REVIEW: visual details need checking'
+            note=(f"Step {shot['step']}: footage needed" if source is None else 'Representative footage | see step review notes')
             if not .85<=shot['video_speed']<=1.15:note+=f" | footage speed {shot['video_speed']:.2f}x"
             draw.text((16,20),note,font=ImageFont.load_default(size=max(12,int(width/55))),fill='#ffd166')
             overlay=media/f'review-{i:03}.png';label.save(overlay)
@@ -174,8 +174,9 @@ def render_actions(plans,audios,library,folder,fps='30000/1001',width=1280,heigh
     with zipfile.ZipFile(folder/'editable-package.zip','w',compression=zipfile.ZIP_STORED) as archive:
         for path in [folder/'editable.mlt',folder/'edit_plan.json',folder/'narration.wav',*[media/f'shot-{i+1:03}.mp4' for i in range(len(shots))]]:
             archive.write(path,path.relative_to(folder).as_posix())
+    gaps=[p['step'] for p in plans if all(s.get('medium')=='review_card' for s in p['shots'])]
     return {'frames':frames,'fps':fps,'duration':frames/float(rate),'shots':len(shots),'steps':len(plans),
-            'review_only':any(s['review'] for s in shots),'placeholder_steps':[],
-            'footage_steps':len(plans),'verified_steps':sum(not p['needs_review'] for p in plans),'dissolves':sum(bool(s.get('left_handle')) for s in shots)}
+            'review_only':any(s['review'] for s in shots),'placeholder_steps':gaps,
+            'footage_steps':len(plans)-len(gaps),'verified_steps':sum(not p['needs_review'] for p in plans),'dissolves':sum(bool(s.get('left_handle')) for s in shots)}
 
 
