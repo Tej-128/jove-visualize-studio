@@ -358,6 +358,10 @@ def convert_inline_math(text: str) -> str:
     text = text.replace('≤', ' is less than or equal to ')
     text = text.replace('≥', ' is greater than or equal to ')
 
+    # Hyphens in compound names and unit modifiers are spoken as spaces.
+    # Keep single-variable expressions such as x-4 and 12-x mathematical.
+    text = re.sub(r'(?<=[A-Za-z]{2})-(?=\d)|(?<=\d)-(?=[A-Za-z]{2})', ' ', text)
+
     # Digit-adjacent unspaced minus: 12-4, 12-x, x-4
     text = re.sub(r'(?<=\d)-(?=[A-Za-z0-9])', ' minus ', text)
     text = re.sub(r'(?<=[A-Za-z])-(?=\d)', ' minus ', text)
@@ -1068,5 +1072,6 @@ if __name__ == '__main__':
     total = len(tests)
     print(f"\n{B}{passed}/{total} tests passed.{X}")
     raise SystemExit(0 if passed == total else 1)
+
 
 

@@ -20,6 +20,19 @@ def answer(**changes):
 
 
 class ScientificAuditTests(unittest.TestCase):
+    def test_metadata_only_review_requires_demonstrated_actions_and_compatible_audit(self):
+        from pipeline.editorial import metadata_only_review
+        row = plan()
+        row.update(scientific_audit_checked=True, scientific_audit={'status':'compatible'},
+                   unobservable_details=['Treatment label unreadable'], needs_review=True)
+        row['shots'][0]['medium'] = 'experimental_footage'
+        self.assertTrue(metadata_only_review(row))
+        for change in ({'shots':[]}, {'dense_checked':False}, {'missing_actions':['Count']},
+                       {'scientific_audit':{'status':'contradiction'}}, {'needs_timing_review':True}):
+            self.assertFalse(metadata_only_review({**row, **change}))
+        row['shots'][0]['evidence'] = 'illustrative'
+        self.assertFalse(metadata_only_review(row))
+
     def test_default_editor_requires_independent_auditing(self):
         with TemporaryDirectory() as t:
             editor=AutomaticEditor(None,SimpleNamespace(videos={}),Mock(),t,[],{})

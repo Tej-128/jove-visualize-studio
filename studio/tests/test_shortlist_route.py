@@ -16,6 +16,8 @@ class ShortlistRouteTests(unittest.TestCase):
         editor.action_catalog = None
         editor.catalog.return_value = []
         plans = AutomaticEditor.run_shortlist(editor, [{'step': 1, 'video_id': '1'}])
-        self.assertEqual(plans, [])
+        # Every step is finalized (kept footage or a labelled gap); the broader selection is discarded.
+        self.assertIs(plans, editor.finalize.return_value)
+        self.assertFalse(editor.plans)
         editor.catalog.assert_called_once_with('1')
         self.assertFalse(editor.backups)

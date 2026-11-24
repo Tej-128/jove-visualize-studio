@@ -12,7 +12,7 @@ import time
 
 SAFE_CONFIG={'voice','TEXT_MODEL','VISION_MODEL','MAX_VISION_CALLS','ENGINE_BUILD',
              'VISUAL_REVIEW_SECONDS','VISUAL_WORKERS','AUTOMATIC_EDITOR','MAX_JOB_SECONDS',
-             'LIBRARY_FOLDER_ID','OUTPUT_FOLDER_ID','HOSTED_SHORTLIST'}
+             'LIBRARY_FOLDER_ID','OUTPUT_FOLDER_ID','HOSTED_SHORTLIST','ALLOW_AI_ILLUSTRATIONS'}
 
 
 class JobQueue:
@@ -37,6 +37,8 @@ class JobQueue:
         finally:db.close()
 
     def enqueue(self,ident,owner,text,config,kind='video'):
+        if config.get('ALLOW_AI_ILLUSTRATIONS', False) is not False:
+            raise ValueError('This queue accepts JoVE-only jobs.')
         safe={k:config[k] for k in SAFE_CONFIG if k in config}
         payload=json.dumps(safe,sort_keys=True)
         fingerprint=hashlib.sha256(json.dumps([owner,text,safe,kind],sort_keys=True).encode()).hexdigest()

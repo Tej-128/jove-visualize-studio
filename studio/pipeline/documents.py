@@ -9,7 +9,14 @@ from docx.table import Table
 
 def word_script_text(data):
     document=Document(BytesIO(data));numbers={};lines=[]
-    numbering=document.part.numbering_part.element
+    # Documents with literal step numbers may not contain a Word numbering part.
+    # Python-docx raises NotImplementedError when that relationship is absent.
+    # These documents must remain valid inputs; don't require a numbering part
+    # unless an actual Word list needs number reconstruction.
+    try:
+        numbering=document.part.numbering_part.element
+    except (KeyError,NotImplementedError):
+        numbering=None
 
     def paragraph_text(p):
         text=p.text.strip()
@@ -22,7 +29,7 @@ def word_script_text(data):
             seen.add(style.style_id);pr=style.element.pPr
             if pr is not None:numpr=pr.numPr
             style=style.base_style
-        if numpr is None or numpr.numId is None:return text
+        if numpr is None or numpr.numId is None or numbering is None:return text
         ident=str(numpr.numId.val);level=int(numpr.ilvl.val) if numpr.ilvl is not None else 0
         num=next((n for n in numbering.findall(qn('w:num')) if n.get(qn('w:numId'))==ident),None)
         if num is None:return text

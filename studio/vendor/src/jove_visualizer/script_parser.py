@@ -62,6 +62,12 @@ def _split_production_parentheticals(text: str) -> tuple[str, list[str]]:
     return cleaned, notes
 
 
+def _spoken_line(text: str) -> str:
+    text = re.sub(r"(?<!\S)[\w-]+\s+\((?:pronounce|read as)\s+([^()]+)\)",
+                  r"\1", text, flags=re.I)
+    return _split_production_parentheticals(text)[0]
+
+
 def _repair_standalone_notes(items: list[dict]) -> list[dict]:
     """Repair any note accidentally interpreted as its own numbered step.
 
@@ -75,7 +81,7 @@ def _repair_standalone_notes(items: list[dict]) -> list[dict]:
         if repaired and _is_scientific_note(joined):
             detail = _strip_note_prefix(joined)
             if detail:
-                repaired[-1]["parts"].append(f"On-screen scientific detail: {detail}")
+                repaired[-1].setdefault("on_screen_text", []).append(detail)
             repaired[-1]["production_notes"].extend(item.get("production_notes", []))
             continue
         if repaired and _is_production_note(joined):
@@ -118,6 +124,7 @@ def parse_steps_from_text(text: str) -> list[ScriptStep]:
             step_text, parenthetical_notes = _split_production_parentheticals(match.group(2).strip())
             current = {
                 "number": int(match.group(1)),
+                "spoken": [_spoken_line(match.group(2))],
                 "parts": [step_text] if step_text else [],
                 "production_notes": parenthetical_notes,
             }
@@ -132,13 +139,14 @@ def parse_steps_from_text(text: str) -> list[ScriptStep]:
         elif _is_scientific_note(line):
             detail = _strip_note_prefix(line)
             if detail:
-                current["parts"].append(f"On-screen scientific detail: {detail}")
+                current.setdefault("on_screen_text", []).append(detail)
         elif _is_production_note(line):
             current["production_notes"].append(line)
         else:
             cleaned, parenthetical_notes = _split_production_parentheticals(line)
             if cleaned:
                 current["parts"].append(cleaned)
+                current["spoken"].append(_spoken_line(line))
             current["production_notes"].extend(parenthetical_notes)
 
     if current is not None:
@@ -154,7 +162,7 @@ def parse_steps_from_text(text: str) -> list[ScriptStep]:
             if _is_scientific_note(line) and numbered:
                 detail = _strip_note_prefix(line)
                 if detail:
-                    numbered[-1]["parts"].append(f"On-screen scientific detail: {detail}")
+                    numbered[-1].setdefault("on_screen_text", []).append(detail)
                 continue
             if _is_production_note(line) and numbered:
                 numbered[-1]["production_notes"].append(line)
@@ -163,6 +171,7 @@ def parse_steps_from_text(text: str) -> list[ScriptStep]:
             if cleaned:
                 numbered.append({
                     "number": len(numbered) + 1,
+                    "spoken": [_spoken_line(line)],
                     "parts": [cleaned],
                     "production_notes": parenthetical_notes,
                 })
@@ -187,6 +196,8 @@ def parse_steps_from_text(text: str) -> list[ScriptStep]:
                 next_text=next_text,
                 script_title=title,
                 production_notes=list(dict.fromkeys(item["production_notes"])),
+                on_screen_text=item.get("on_screen_text", []),
+                narration_text=" ".join(item["spoken"]).strip(),
             )
         )
 

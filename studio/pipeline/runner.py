@@ -101,7 +101,7 @@ class Jobs:
 
     def file(self,ident,owner,name):
         self.state(ident,owner)
-        if name not in {'preview.mp4','editable-package.zip','report.json','matches.xlsx','matches.json','state.json','audio-adjustments.json','coverage.json','quality.json','edit_plan.json'}:
+        if name not in {'preview.mp4','editable-package.zip','report.json','matches.xlsx','matches.json','state.json','audio-adjustments.json','coverage.json','quality.json','edit_plan.json','review.json','review.md'}:
             raise PermissionError('Unsupported download')
         path=self.root/ident/name
         plan=path.parent/'edit_plan.json'
@@ -125,7 +125,7 @@ class Jobs:
         state=self.state(ident,owner)
         if state['status'] not in {'complete','needs_review'}:raise ValueError('Wait for processing to finish before reviewing footage.')
         folder=self.root/ident;plan=json.loads((folder/'edit_plan.json').read_text())
-        shots=[s for s in plan['shots'] if s['step']==step]
+        shots=[s for s in plan['shots'] if s['step']==step and s.get('kind','footage')=='footage']
         if not shots:raise ValueError('No rendered footage exists for this step.')
         path=folder/'review-exclusions.json';excluded=json.loads(path.read_text()) if path.exists() else []
         for shot in shots:
@@ -264,19 +264,22 @@ def run_catalog(folder,owner,config):
 
 def prepare_narration(folder,step,position,voice,api_key):
     path=folder/f'narration-{position+1:03}.wav';generated=False
+    narration = getattr(step, 'narration_text', '') or step.text
     if path.exists() and path.with_suffix('.json').exists():
         info=json.loads(path.with_suffix('.json').read_text())
         from .tts_preprocessor import prepare_script_for_tts
-        spoken='\n\n'.join(prepare_script_for_tts(step.text)[0])
+        spoken='\n\n'.join(prepare_script_for_tts(narration)[0])
         if info.get('spoken')!=spoken or info.get('voice_id')!=voice['id'] or info.get('generation_speed')!=float(voice['speed']):
             raise ValueError('Saved narration uses a different script or voice profile; choose its original profile or start a new project.')
     else:
-        info=generate_step_audio(step.text,step.previous_text,step.next_text,voice['id'],float(voice['speed']),api_key,path)
+        info=generate_step_audio(narration,step.previous_text,step.next_text,voice['id'],float(voice['speed']),api_key,path)
         generated=True
     return position,path,info,generated
 
 
 def run(folder,owner,text,config):
+    if config.get('ALLOW_AI_ILLUSTRATIONS', False) is not False:
+        raise ValueError('This worker accepts JoVE-only jobs.')
     config={**config,'_PIPELINE_STARTED':time.monotonic(),'_REUSED_STAGES':[],'_STAGE_SECONDS':{}}
     state=json.loads((folder/'state.json').read_text());store=None;remote=None;index=None
     if state['owner']!=owner:raise PermissionError('This project belongs to another user')
@@ -453,12 +456,14 @@ def run(folder,owner,text,config):
 
 
 def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store,remote):
+    from functools import partial
     from .automatic_edit import AutomaticEditor,VERSION
-    from .action_render import render_actions, cut_schedule, TimingCoverageError
+    from .action_render import render_actions
     from .action_catalog import open_catalog
     from .editorial import quality_report
+    from .review_contract import decompose_step,contract_record,review_markdown
     started=time.monotonic()
-    checkpoint('visual_verification',detail='Checking suggested timestamps first. Suitable footage is retained while timing is solved separately.',
+    checkpoint('visual_verification',detail='Checking suggested timestamps first. Useful footage is kept and its limitations are labelled.',
                editor_version=VERSION,engine_build=config.get('ENGINE_BUILD'),verification=None,total_visual_steps=len(steps),completed_visual_steps=0)
     gateway=ModelGateway(config['OPENAI_API_KEY'],config.get('VISION_MODEL','gpt-4.1-mini'),int(config.get('MAX_VISION_CALLS',80)),
                          cache_dir=folder/'automatic-cache')
@@ -474,61 +479,50 @@ def run_automatic_edit(folder,steps,audios,index,library,config,checkpoint,store
     # ten-minute target on discovery. Actual wall time is measured in the report.
     remaining=480-(time.monotonic()-config.get('_PIPELINE_STARTED',started))
     editor=AutomaticEditor(index,library,gateway,folder/'automatic',steps,audio_map,progress=progress,
-        seconds=max(1,min(int(config.get('VISUAL_REVIEW_SECONDS',300)),remaining)),workers=int(config.get('VISUAL_WORKERS',3)),action_catalog=catalog)
-    plugin_cuts = bool(config.get('HOSTED_SHORTLIST'))
-    candidates = editor.run(json.loads((folder/'matches.json').read_text()))
-    plans = []
-    for plan in candidates:
-        if not plan.get('dense_checked') or not plan.get('scientific_audit_checked'):
-            continue
-        if not all(shot.get('medium') == 'experimental_footage' and
-                   shot.get('evidence') in {'demonstrated', 'illustrative'} for shot in plan['shots']):
-            continue
-        plans.append(plan)
-    missing=[s.number for s in steps if s.number not in {p['step'] for p in plans}]
-    issues=[{'step':p['step'],'reason':'; '.join(p['missing_actions']+p['unobservable_details']) or 'Illustrative footage requires review.'}
-            for p in plans if p['needs_review']]
-    issues.extend({'step':number,'reason':'No usable related footage was retained. The narration is retained with a footage-needed label.'} for number in missing)
-    report={'editor_version':VERSION,'selected':plans,'issues':issues,'omitted_steps':[],
+        seconds=max(1,min(int(config.get('VISUAL_REVIEW_SECONDS',300)),remaining)),workers=int(config.get('VISUAL_WORKERS',3)),action_catalog=catalog,
+        audit_required=bool(config.get('SCIENTIFIC_AUDIT',False)),decomposer=partial(decompose_step,gateway=gateway))
+    # Hosted jobs use the full search order too (suggested ranges first, then wider
+    # retrieval); HOSTED_SHORTLIST only selects plugin-style cuts. Every step returns a plan.
+    plans=editor.run(json.loads((folder/'matches.json').read_text()))
+    overlays = {step.number: step.on_screen_text for step in steps}
+    for plan in plans:
+        plan["on_screen_text"] = overlays[plan["step"]]
+    gaps=[p['step'] for p in plans if not p['shots']]
+    issues=[{'step':p['step'],'status':p['status'],'reason':'; '.join([*p['missing_actions'],*p.get('review_flags',[])])
+             or 'Representative or directly visible footage; protocol details stay unverified until review.'} for p in plans]
+    report={'editor_version':VERSION,'selected':plans,'issues':issues,'omitted_steps':[],'gap_steps':gaps,
             'catalog_ready':bool(catalog is not None and catalog.ready),
             'catalog_sources':len(catalog.data['videos']) if catalog is not None else 0,
             'reused_stages':config.get('_REUSED_STAGES',[]),
             'stage_seconds':dict(config.get('_STAGE_SECONDS',{})),
             'attempts':editor.attempts,'model_requests':gateway.prior_calls+gateway.calls,
             'visual_seconds':round(time.monotonic()-started,2),'input_contract':'Plain script only. No reference timestamps or benchmark selections were supplied to this editor.',
-            'review_method': 'Suggested ranges followed by wider retrieval and visual discovery.'}
-    selected = {plan['step']: plan for plan in plans}
-    timeline = []
-    for step in steps:
-        if step.number in selected:
-            timeline.append(selected[step.number])
-            continue
-        note = 'Footage needed for this step'
-        timeline.append({'step': step.number, 'text': step.text, 'needs_review': True,
-                         'missing_actions': [step.text], 'unobservable_details': [],
-                         'shots': [{'video_id': None, 'start': 0, 'end': audio_map[step.number]['duration'],
-                                    'medium': 'review_card', 'reason': note, 'evidence': 'absent'}]})
-    report['footage_needed_steps'] = missing
+            'review_method':'Suggested ranges followed by wider retrieval and visual discovery, on the review-draft contract.'}
     write_json(folder/'report.json',report);store.upload(folder/'report.json',remote)
-    checkpoint('assembly',detail=f'Rendering {len(plans)} script steps using real source footage. Narration is retained; review flags stay visible.',issues=issues)
-    result=render_actions(timeline,audio_map,library,folder,plugin_cuts=plugin_cuts)
-    for row in json.loads((folder/'audio-adjustments.json').read_text()):
-        if not .85<=row['video_speed']<=1.151:
-            issues.append({'step':row['step'],'reason':f"Footage plays at {row['video_speed']:.2f}x to retain the complete selected action and natural narration. Review pacing."})
-        if row.get('additional_viewing_seconds',0)>.3:
-            issues.append({'step':row['step'],'reason':f"The selected action requires {row['additional_viewing_seconds']:.1f} extra seconds of viewing after narration; review pacing or select a more concise action."})
-    result['review_only']=bool(issues);result['omitted_steps']=[];result['placeholder_steps']=missing;result['footage_steps']=len(plans)
+    # A review draft is always rendered: every narration step stays on the timeline,
+    # footage limitations are labelled, and approval stays with the human reviewer.
+    checkpoint('assembly',detail=f'Rendering all {len(plans)} script steps on the narration clock. Steps without footage get labelled cards.',issues=issues)
+    result=render_actions(plans,audio_map,library,folder,plugin_cuts=bool(config.get('HOSTED_SHORTLIST')))
+    adjustments=json.loads((folder/'audio-adjustments.json').read_text())
+    by_step={row['step']:row for row in adjustments}
+    records=[contract_record(p,by_step.get(p['step'])) for p in plans]
+    write_json(folder/'review.json',{'schema':'jove-review-draft/1','publication_approved':False,
+        'human_scientific_review_required':True,'steps':records})
+    (folder/'review.md').write_text(review_markdown(records,steps),encoding='utf-8')
     elapsed=round(time.monotonic()-config.get('_PIPELINE_STARTED',started),2)
-    quality=quality_report(steps,plans,json.loads((folder/'audio-adjustments.json').read_text()),elapsed)
-    result['review_only']=bool(issues) or not quality['automated_checks_passed']
+    quality=quality_report(steps,plans,adjustments,elapsed)
     write_json(folder/'quality.json',quality)
-    report.update(issues=issues,verification=result,quality=quality,processing_seconds=elapsed,draft_contains_placeholders=bool(missing))
+    result.update(review_only=True,omitted_steps=[],gap_steps=gaps)
+    report.update(issues=issues,verification=result,quality=quality,processing_seconds=elapsed,
+                  draft_contains_placeholders=bool(gaps),review=records)
     write_json(folder/'report.json',report)
-    for name in ['report.json','preview.mp4','editable-package.zip','edit_plan.json','audio-adjustments.json','quality.json']:
+    for name in ['report.json','review.json','review.md','preview.mp4','editable-package.zip','edit_plan.json','audio-adjustments.json','quality.json']:
         store.upload(folder/name,remote)
-    checkpoint('review' if result['review_only'] else 'complete','needs_review' if result['review_only'] else 'complete',
-               detail=f"MP4 and editable timeline rendered with real footage for {len(plans)} of {len(steps)} steps. All narration steps retained. Review the listed uncertainties before production use.",
-               issues=issues,verification=result,timing_attempted=True,full_subset_finished=True,completed_visual_steps=len(steps))
+    checkpoint('review','needs_review',
+               detail=(f"Review draft rendered with all {len(plans)} narration steps: {len(plans)-len(gaps)} with footage, "
+                       f"{len(gaps)} labelled gaps. Approval stays with the scientific reviewer."),
+               issues=issues,verification=result,timing_attempted=True,full_subset_finished=True,completed_visual_steps=len(steps),
+               processing_status='complete',technical_status='rendered',scientific_status='human_review_required')
 
 
 def run_timing(folder,owner,config):

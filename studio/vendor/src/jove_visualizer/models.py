@@ -119,6 +119,8 @@ class ScriptStep:
     core_action: str = ""
     hard_constraints: list[str] = field(default_factory=list)
     soft_constraints: list[str] = field(default_factory=list)
+    on_screen_text: list[str] = field(default_factory=list)
+    narration_text: str = ""
 
 
 @dataclass(slots=True)
