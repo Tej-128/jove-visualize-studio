@@ -14,8 +14,8 @@ from pipeline.action_render import render_actions
 from pipeline.automatic_edit import AutomaticEditor
 from pipeline.editorial import quality_report
 from pipeline.media import execute
-from pipeline.review_contract import (CONFLICT_TYPES, STATUSES, contract_record, decompose_step, review_markdown,
-                                      review_plan, review_schema, rule_decomposition)
+from pipeline.review_contract import (CONFLICT_TYPES, DIFFERENCE_TO_CONFLICT, DIFFERENCES, STATUSES, contract_record,
+                                      decompose_step, review_markdown, review_plan, review_schema, rule_decomposition)
 
 STEPS = {
     'plate': 'Add 100 microliters of the diluted antigen to each well of a 96-well plate.',
@@ -126,10 +126,13 @@ class ContractTests(unittest.TestCase):
                 for child in node['properties'].values():walk(child)
             if node.get('type') == 'array':walk(node['items'])
         walk(schema)
-        shot_props = schema['properties']['shots']['items']['properties']
-        self.assertEqual(shot_props['window_id']['enum'], ['w0', 'w1'])
-        self.assertEqual(shot_props['illustrates']['items']['enum'], [self.quote])
-        self.assertEqual(schema['properties']['exclusion_notes']['items']['properties']['conflict_type']['enum'], list(CONFLICT_TYPES))
+        verdict = schema['properties']['windows']['items']['properties']
+        self.assertEqual(verdict['window_id']['enum'], ['w0', 'w1'])
+        self.assertEqual(verdict['illustrates']['items']['enum'], [self.quote])
+        self.assertEqual(verdict['difference']['enum'], list(DIFFERENCES))
+        self.assertIn('invisible_details_only', verdict['difference']['enum'])
+        self.assertEqual(set(DIFFERENCE_TO_CONFLICT.values()), set(CONFLICT_TYPES))
+
 
     def test_record_has_exactly_the_editorial_contract_shape(self):
         plan = self.plan(answer([shot(illustrates=[self.quote])],
@@ -142,6 +145,54 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(any('held for 2.0 s' in f for f in record['review_flags']))
         self.assertIn(record['status'], STATUSES)
         self.assertIn('| 2 | representative only |', review_markdown([record], [SimpleNamespace(number=2, text=STEPS['plate'])]))
+
+
+def verdict(window='w0', difference='invisible_details_only', start=12., end=16., illustrates=(), **extra):
+    return dict(window_id=window, visible_operation=extra.pop('seen', 'Gloved hand works at a multiwell plate.'),
+                apparatus='multiwell plate, pipette', difference=difference, illustrates=list(illustrates),
+                start=start, end=end, action_start=start, action_end=end, visible_observations=[],
+                unverified_details=['Liquid identity'], reason=extra.pop('reason', ''), evidence=extra.pop('evidence', ''))
+
+
+class VerdictTests(unittest.TestCase):
+    """The live ELISA run showed the model calling same-operation clips 'different operation'. Code now decides."""
+    def setUp(self):
+        self.decomposition = rule_decomposition(STEPS['seal'])
+        self.seal, self.incubate = [a['quote'] for a in self.decomposition['actions']]
+
+    def plan(self, verdicts, narration=None, keep_all=False):
+        return review_plan({'windows': verdicts, 'review_flags': []}, windows(), 3, STEPS['seal'], self.decomposition,
+                           narration_seconds=narration, keep_all=keep_all)
+
+    def test_same_operation_from_another_experiment_is_kept_as_representative(self):
+        plan = self.plan([verdict(illustrates=[self.seal], seen='Covers a cell-culture plate with adhesive film.',
+                                  reason='Same sealing operation; the plate contents cannot be confirmed.')])
+        self.assertEqual(len(plan['shots']), 1);self.assertEqual(plan['shots'][0]['evidence_level'], 'representative')
+        self.assertIn('Covers a cell-culture plate with adhesive film.', plan['shots'][0]['visible_observations'])
+        self.assertEqual(plan['exclusion_notes'], []);self.assertEqual(plan['missing_actions'], [self.incubate])
+
+    def test_only_visible_differences_exclude_and_only_their_window(self):
+        plan = self.plan([verdict(difference='none', illustrates=[self.seal]),
+                          verdict('w1', 'apparatus', 380., 420., reason='Robotic medium exchanger, no plate sealing.', evidence='386 s')])
+        self.assertEqual([s['video_id'] for s in plan['shots']], ['70511']);self.assertEqual(plan['shots'][0]['evidence_level'], 'directly_visible')
+        self.assertEqual(plan['exclusion_notes'][0]['conflict_type'], 'incompatible_apparatus')
+        self.assertEqual(plan['exclusion_notes'][0]['video_id'], '55403')
+
+    def test_code_covers_each_action_once_then_fills_short_steps(self):
+        verdicts = [verdict('w0', 'invisible_details_only', 12., 14., illustrates=[self.seal]),
+                    verdict('w0', 'none', 20., 23., illustrates=[self.seal]),
+                    verdict('w1', 'invisible_details_only', 385., 395., illustrates=[self.incubate])]
+        short = self.plan(verdicts, narration=5)
+        self.assertEqual([(s['start'], s['evidence_level']) for s in short['shots']], [(20., 'directly_visible'), (385., 'representative')])
+        self.assertEqual(short['missing_actions'], [])
+        long = self.plan(verdicts, narration=30)
+        self.assertEqual(len(long['shots']), 3)
+        self.assertEqual(len(self.plan(verdicts, narration=5, keep_all=True)['shots']), 3)
+
+    def test_a_window_kept_and_excluded_keeps_the_footage_and_flags_it(self):
+        plan = self.plan([verdict(illustrates=[self.seal]), verdict('w0', 'operation', 10., 30., reason='Pipetting.')])
+        self.assertEqual(len(plan['shots']), 1);self.assertEqual(plan['exclusion_notes'], [])
+        self.assertTrue(any('both kept and excluded' in f for f in plan['review_flags']))
 
 
 class EditorFinalizeTests(unittest.TestCase):
@@ -222,12 +273,13 @@ class FakeGateway:
             raise TimeoutError('decomposition unavailable; rules are used')
         window = payload['windows'][0]
         if window['video_id'] != '101' or window['start'] > 15:
-            return answer([], exclusions=[{'window_id': window['window_id'], 'conflict_type': 'unsuitable_medium',
-                                           'reason': 'Title card only.', 'evidence': f"{window['start']:.0f} s"}])
+            return {'windows': [verdict(window['window_id'], 'medium', window['start'], window['end'],
+                                        reason='Title card only.', evidence=f"{window['start']:.0f} s")], 'review_flags': []}
         start, end = window['start'], window['end']
-        if 'enum' not in schema['properties']['shots']['items']['properties']['start']:
+        if 'enum' not in schema['properties']['windows']['items']['properties']['start']:
             start, end = start + .2, min(end - .2, start + 3.2)
-        return answer([shot(window['window_id'], start, end, illustrates=[payload['step_actions'][0]['quote']])])
+        return {'windows': [verdict(window['window_id'], 'invisible_details_only', start, end,
+                                    illustrates=[payload['step_actions'][0]['quote']])], 'review_flags': []}
 
 
 class HostedJobPathTests(unittest.TestCase):
