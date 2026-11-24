@@ -211,5 +211,69 @@ class ReviewDraftRenderTests(unittest.TestCase):
             self.assertEqual(quality['gap_steps'], [2]);self.assertEqual(quality['step_status']['no_suitable_footage'], 1)
 
 
+class FakeGateway:
+    """Stands in for the model only. Step 1 gets representative footage; step 2 gets a typed exclusion."""
+    def __init__(self):
+        self.calls, self.prior_calls, self.deadline = [], [], None
+
+    def ask(self, instructions, payload, images=(), schema=None):
+        self.calls.append({'status': 'complete'})
+        if 'actions' in (schema or {}).get('properties', {}):
+            raise TimeoutError('decomposition unavailable; rules are used')
+        window = payload['windows'][0]
+        if window['video_id'] != '101' or window['start'] > 15:
+            return answer([], exclusions=[{'window_id': window['window_id'], 'conflict_type': 'unsuitable_medium',
+                                           'reason': 'Title card only.', 'evidence': f"{window['start']:.0f} s"}])
+        start, end = window['start'], window['end']
+        if 'enum' not in schema['properties']['shots']['items']['properties']['start']:
+            start, end = start + .2, min(end - .2, start + 3.2)
+        return answer([shot(window['window_id'], start, end, illustrates=[payload['step_actions'][0]['quote']])])
+
+
+class HostedJobPathTests(unittest.TestCase):
+    def test_hosted_shortlist_job_always_renders_review_files_for_every_step(self):
+        from openpyxl import Workbook
+        from pipeline.runner import run_automatic_edit
+        with TemporaryDirectory() as t:
+            root = Path(t);folder = root / 'job';folder.mkdir();source = root / '101.mp4'
+            execute(['-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30:duration=40', '-c:v', 'libx264', '-threads', '1',
+                     '-preset', 'ultrafast', source], root / 'make-video.log')
+            steps = [SimpleNamespace(number=1, text=STEPS['plate'], on_screen_text=[]),
+                     SimpleNamespace(number=2, text=STEPS['software'], on_screen_text=[])]
+            audios = []
+            for step, seconds in zip(steps, (3, 2)):
+                voice = root / f'voice-{step.number}.wav'
+                execute(['-f', 'lavfi', '-i', f'sine=frequency=440:sample_rate=44100:duration={seconds}', '-c:a', 'pcm_s16le', voice],
+                        root / f'make-voice-{step.number}.log')
+                audios.append({'path': str(voice), 'duration': seconds})
+            book = Workbook();sheet = book.active
+            sheet.append(['Step', 'Script Step', 'Journal ID', 'Start', 'End', 'Matching CC Text'])
+            sheet.append([1, STEPS['plate'], '101', 2, 12, 'Pipette into the wells.'])
+            sheet.append([2, STEPS['software'], '101', 20, 30, 'Title card.'])
+            book.save(folder / 'matches.xlsx')
+            library = SimpleNamespace(videos={'101': {'sha256': 'a' * 64, 'filename': '101.mp4'}}, video=lambda _: source,
+                                      cache=root / 'cache', has_prepared_overview=lambda _: True)
+            checkpoint, store = Mock(), Mock()
+            config = {'OPENAI_API_KEY': 'unused', 'OUTPUT_FOLDER_ID': 'out', 'HOSTED_SHORTLIST': True}
+            with patch('pipeline.runner.ModelGateway', return_value=FakeGateway()), \
+                 patch('pipeline.action_catalog.open_catalog', side_effect=RuntimeError('no catalogue')), \
+                 patch('pipeline.automatic_edit.screen_video', return_value={'candidates': []}):
+                run_automatic_edit(folder, steps, audios, SimpleNamespace(embedder=None), library, config, checkpoint, store, 'remote')
+            review = json.loads((folder / 'review.json').read_text(encoding='utf-8'))
+            self.assertFalse(review['publication_approved'])
+            self.assertEqual([r['step'] for r in review['steps']], [1, 2])
+            self.assertEqual(review['steps'][0]['status'], 'representative_only')
+            self.assertEqual(review['steps'][1]['status'], 'no_suitable_footage')
+            self.assertEqual(review['steps'][1]['exclusion_notes'][0]['reason'], 'unsuitable_medium: Title card only.')
+            self.assertIn('| 2 | no suitable footage |', (folder / 'review.md').read_text(encoding='utf-8'))
+            count, _ = imageio_ffmpeg.count_frames_and_secs(str(folder / 'preview.mp4'))
+            self.assertEqual(count, round(5 * 30000 / 1001))
+            final = checkpoint.call_args
+            self.assertEqual(final.args, ('review', 'needs_review'))
+            self.assertEqual(final.kwargs['technical_status'], 'rendered');self.assertTrue(final.kwargs['verification'])
+            uploaded = {c.args[0].name for c in store.upload.call_args_list}
+            self.assertTrue({'review.json', 'review.md', 'preview.mp4', 'editable-package.zip'} <= uploaded)
+
+
 if __name__ == '__main__':
     unittest.main()
